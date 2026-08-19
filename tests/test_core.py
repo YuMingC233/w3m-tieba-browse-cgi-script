@@ -4,6 +4,7 @@ import unittest
 from tieba_filter import (
     _build_upstream_url,
     add_forum_pagination,
+    add_thread_pagination,
     extract_thread_id,
     filter_tieba_html,
     render_lzl_page,
@@ -51,6 +52,26 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertIn("第 2 / 3 页", paginated)
         self.assertIn("?kw=%E5%AD%99%E7%AC%91%E5%B7%9D&amp;pn=0", paginated)
         self.assertIn("?kw=%E5%AD%99%E7%AC%91%E5%B7%9D&amp;pn=60", paginated)
+
+        thread_source = """
+        <html><body>帖子正文<script>
+        conf: {page: {"page_size":30,"offset":30,"current_page":2,
+        "total_page":19}}
+        </script></body></html>
+        """
+        thread_paginated = add_thread_pagination(
+            thread_source,
+            "10955297834&pn=30&see_lz=1",
+        )
+        self.assertIn("第 2 / 19 页", thread_paginated)
+        self.assertIn(
+            "?10955297834&amp;pn=0&amp;see_lz=1",
+            thread_paginated,
+        )
+        self.assertIn(
+            "?10955297834&amp;pn=60&amp;see_lz=1",
+            thread_paginated,
+        )
 
         self.assertEqual(
             _build_upstream_url(

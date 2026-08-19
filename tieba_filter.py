@@ -419,6 +419,61 @@ def add_forum_pagination(source: str, request_value: str) -> str:
     return source + pager
 
 
+def add_thread_pagination(source: str, request_value: str) -> str:
+    """Add ordinary links for Tieba's JavaScript-only thread pagination."""
+
+    thread_id = extract_thread_id(request_value)
+    request_params = _safe_upstream_params(request_value)
+    requested_offset = int(request_params.get("pn", "0"))
+    page_match = re.search(r"\bpage\s*:\s*(\{[^{}]+\})", source)
+    page_data: dict[str, object] = {}
+    if page_match:
+        try:
+            page_data = json.loads(page_match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            page_data = {}
+
+    page_size = page_data.get("page_size", 30)
+    offset = page_data.get("offset", requested_offset)
+    total_page = page_data.get("total_page")
+    if not isinstance(page_size, int) or page_size <= 0:
+        page_size = 30
+    if not isinstance(offset, int) or offset < 0:
+        offset = requested_offset
+
+    current_page = offset // page_size + 1
+    if isinstance(page_data.get("current_page"), int):
+        current_page = int(page_data["current_page"])
+
+    def page_href(page_offset: int) -> str:
+        params = {"pn": str(page_offset)}
+        for name in ("see_lz", "r"):
+            if name in request_params:
+                params[name] = request_params[name]
+        query = thread_id + "&" + urllib.parse.urlencode(params)
+        return html.escape(f"{CGI_URL}{query}", quote=True)
+
+    links: list[str] = []
+    if offset > 0:
+        links.append(f'<a href="{page_href(max(0, offset - page_size))}">上一页</a>')
+
+    if isinstance(total_page, int) and total_page > 0:
+        links.append(f"第 {current_page} / {total_page} 页")
+        has_next = current_page < total_page
+    else:
+        links.append(f"第 {current_page} 页")
+        has_next = True
+
+    if has_next:
+        links.append(f'<a href="{page_href(offset + page_size)}">下一页</a>')
+
+    pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p></nav>"
+    body_end = source.lower().rfind("</body>")
+    if body_end >= 0:
+        return source[:body_end] + pager + source[body_end:]
+    return source + pager
+
+
 def render_lzl_page(source: str, request_value: str) -> str:
     """Render one page of nested replies with ordinary CGI pagination links."""
 
@@ -552,6 +607,8 @@ def render_request(request_value: str) -> str:
         return render_lzl_page(source, request_value)
     if _is_forum_request(request_value):
         source = add_forum_pagination(source, request_value)
+    else:
+        source = add_thread_pagination(source, request_value)
     return filter_tieba_html(
         source,
         base_url=upstream_url,
