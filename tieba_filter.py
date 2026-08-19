@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch and simplify Tieba mobile thread pages for text browsers."""
+"""Fetch and simplify Tieba forum, thread, and nested-reply pages for w3m."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from html.parser import HTMLParser
 
 
 TIEBA_HOSTS = {"tieba.baidu.com", "www.tieba.baidu.com"}
+# These are legacy page endpoints, not a versioned or stability-guaranteed API.
 MOBILE_THREAD_URL = "https://tieba.baidu.com/mo/q---1-3-0--2/m"
+LZL_URL = "https://tieba.baidu.com/p/comment"
 CGI_URL = "file:/cgi-bin/tieba_filter.py?"
 
 DROP_CLASSES = {
@@ -43,6 +45,11 @@ DROP_CLASSES = {
     "blue_kit_right",
     "list_item_more_operation",
     "lzl_cut_more_btn",
+    "lzl_p_p",
+    "lzl_s_r",
+    "lzl_jb",
+    "lzl_op_list",
+    "lzl_li_pager",
     "father-cut-daoliu-normal-box",
     "father-cut-daoliu-from-toutiao-box",
     "father_cut_daoliu",
@@ -144,6 +151,35 @@ def _is_forum_request(value: str) -> bool:
     return "kw" in urllib.parse.parse_qs(query, keep_blank_values=True)
 
 
+def _lzl_request_params(value: str) -> tuple[str, str, int]:
+    """Return thread id, parent post id, and one-based nested-reply page."""
+
+    decoded = html.unescape(value).strip()
+    parsed = urllib.parse.urlsplit(decoded)
+    query = parsed.query if parsed.scheme or parsed.netloc else decoded.removeprefix("?")
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    if params.get("lzl", [""])[0] != "1":
+        raise ValueError("缺少楼中楼请求标记")
+
+    thread_id = params.get("tid", [""])[0]
+    parent_post_id = params.get("pid", [""])[0]
+    page_value = params.get("pn", ["1"])[0]
+    if not re.fullmatch(r"\d{5,}", thread_id):
+        raise ValueError("楼中楼 tid 参数无效")
+    if not re.fullmatch(r"\d{5,}", parent_post_id):
+        raise ValueError("楼中楼 pid 参数无效")
+    if not re.fullmatch(r"[1-9]\d*", page_value):
+        raise ValueError("楼中楼 pn 参数必须是正整数")
+    return thread_id, parent_post_id, int(page_value)
+
+
+def _is_lzl_request(value: str) -> bool:
+    decoded = html.unescape(value)
+    parsed = urllib.parse.urlsplit(decoded)
+    query = parsed.query if parsed.scheme or parsed.netloc else decoded.removeprefix("?")
+    return urllib.parse.parse_qs(query, keep_blank_values=True).get("lzl") == ["1"]
+
+
 def _cgi_href_for_tieba_url(href: str, base_url: str) -> str:
     absolute = urllib.parse.urljoin(base_url, html.unescape(href))
     try:
@@ -163,6 +199,16 @@ class _TiebaHTMLFilter(HTMLParser):
         self.output: list[str] = []
         self.skip_depth = 0
         self.base_written = False
+        self.li_depth = 0
+        self.current_post_pid: str | None = None
+        self.current_post_li_depth: int | None = None
+        self.current_lzl_total: int | None = None
+        self.thread_id: str | None = None
+        if base_url:
+            try:
+                self.thread_id = extract_thread_id(base_url)
+            except ValueError:
+                pass
 
     @staticmethod
     def _attr_map(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
@@ -217,6 +263,39 @@ class _TiebaHTMLFilter(HTMLParser):
                 self.skip_depth += 1
             return
 
+        attr_map = self._attr_map(attrs)
+        classes = set(attr_map.get("class", "").split())
+        if tag == "li":
+            self.li_depth += 1
+            if "post_list_item" in classes and attr_map.get("tid", "").isdigit():
+                self.current_post_pid = attr_map["tid"]
+                self.current_post_li_depth = self.li_depth
+                self.current_lzl_total = None
+
+        if tag == "div" and "fr_list" in classes:
+            count = attr_map.get("data-list-count", "")
+            self.current_lzl_total = int(count) if count.isdigit() else None
+
+        if tag == "span" and "lzl_cut_more_btn" in classes:
+            if self.thread_id and self.current_post_pid:
+                query = urllib.parse.urlencode(
+                    {
+                        "lzl": "1",
+                        "tid": self.thread_id,
+                        "pid": self.current_post_pid,
+                        "pn": "1",
+                    }
+                )
+                total = (
+                    f" {self.current_lzl_total} 条"
+                    if self.current_lzl_total is not None
+                    else ""
+                )
+                href = html.escape(f"{CGI_URL}{query}", quote=True)
+                self.output.append(f'<a href="{href}">查看全部{total}楼中楼</a>')
+            self.skip_depth = 1
+            return
+
         if self._should_drop(tag, attrs):
             if tag not in VOID_ELEMENTS:
                 self.skip_depth = 1
@@ -243,7 +322,14 @@ class _TiebaHTMLFilter(HTMLParser):
         if self.skip_depth:
             self.skip_depth -= 1
             return
-        self.output.append(f"</{tag.lower()}>")
+        tag = tag.lower()
+        self.output.append(f"</{tag}>")
+        if tag == "li":
+            if self.current_post_li_depth == self.li_depth:
+                self.current_post_pid = None
+                self.current_post_li_depth = None
+                self.current_lzl_total = None
+            self.li_depth = max(0, self.li_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if not self.skip_depth:
@@ -333,7 +419,66 @@ def add_forum_pagination(source: str, request_value: str) -> str:
     return source + pager
 
 
+def render_lzl_page(source: str, request_value: str) -> str:
+    """Render one page of nested replies with ordinary CGI pagination links."""
+
+    thread_id, parent_post_id, page = _lzl_request_params(request_value)
+    decoded_source = html.unescape(source)
+    total_num_match = re.search(r'"total_num"\s*:\s*(\d+)', decoded_source)
+    total_page_match = re.search(r'"total_page"\s*:\s*(\d+)', decoded_source)
+    total_num = int(total_num_match.group(1)) if total_num_match else None
+    total_page = int(total_page_match.group(1)) if total_page_match else None
+
+    upstream_url = (
+        f"{LZL_URL}?"
+        + urllib.parse.urlencode(
+            {"tid": thread_id, "pid": parent_post_id, "pn": page}
+        )
+    )
+    content = filter_tieba_html(source, base_url=upstream_url)
+
+    def page_href(target_page: int) -> str:
+        query = urllib.parse.urlencode(
+            {
+                "lzl": "1",
+                "tid": thread_id,
+                "pid": parent_post_id,
+                "pn": target_page,
+            }
+        )
+        return html.escape(f"{CGI_URL}{query}", quote=True)
+
+    links: list[str] = []
+    if page > 1:
+        links.append(f'<a href="{page_href(page - 1)}">上一页</a>')
+    if total_num is not None and total_page is not None:
+        links.append(f"共 {total_num} 条 · 第 {page} / {total_page} 页")
+        has_next = page < total_page
+    else:
+        links.append(f"第 {page} 页")
+        has_next = bool(content.strip())
+    if has_next:
+        links.append(f'<a href="{page_href(page + 1)}">下一页</a>')
+
+    pager = " | ".join(links)
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f"<title>帖子 {thread_id} 的楼中楼</title></head><body>"
+        f"<h1>楼中楼</h1><ul>{content}</ul><nav><hr><p>{pager}</p></nav>"
+        "</body></html>"
+    )
+
+
 def _build_upstream_url(request_value: str) -> str:
+    if _is_lzl_request(request_value):
+        thread_id, parent_post_id, page = _lzl_request_params(request_value)
+        return (
+            f"{LZL_URL}?"
+            + urllib.parse.urlencode(
+                {"tid": thread_id, "pid": parent_post_id, "pn": page}
+            )
+        )
+
     if _is_forum_request(request_value):
         forum_name, offset = _forum_request_params(request_value)
         params = {"kw": forum_name}
@@ -394,6 +539,8 @@ def fetch_tieba_html(request_value: str, *, timeout: float = 25.0) -> tuple[str,
 
 def render_request(request_value: str) -> str:
     source, upstream_url = fetch_tieba_html(request_value)
+    if _is_lzl_request(request_value):
+        return render_lzl_page(source, request_value)
     if _is_forum_request(request_value):
         source = add_forum_pagination(source, request_value)
     return filter_tieba_html(

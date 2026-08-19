@@ -5,6 +5,7 @@ from tieba_filter import (
     add_forum_pagination,
     extract_thread_id,
     filter_tieba_html,
+    render_lzl_page,
 )
 
 
@@ -50,6 +51,41 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertIn("?kw=%E5%AD%99%E7%AC%91%E5%B7%9D&amp;pn=0", paginated)
         self.assertIn("?kw=%E5%AD%99%E7%AC%91%E5%B7%9D&amp;pn=60", paginated)
 
+        self.assertEqual(
+            _build_upstream_url(
+                "lzl=1&tid=10955297834&pid=153847299771&pn=2"
+            ),
+            "https://tieba.baidu.com/p/comment?"
+            "tid=10955297834&pid=153847299771&pn=2",
+        )
+        with self.assertRaises(ValueError):
+            _build_upstream_url("lzl=1&tid=10955297834&pid=invalid&pn=1")
+
+        lzl_source = """
+        <li class="lzl_single_post j_lzl_s_p">
+          <a class="at j_user_card">楼中楼用户</a>:
+          <span class="lzl_content_main">完整楼中楼内容</span>
+          <div class="lzl_content_reply">
+            <span class="lzl_time">2026-8-19 14:56</span>
+            <a class="lzl_s_r" href="#">回复</a>
+          </div>
+        </li>
+        <li class="lzl_li_pager" data-field="{&quot;total_num&quot;:107,
+        &quot;total_page&quot;:11}">贴吧原始分页</li>
+        """
+        lzl_page = render_lzl_page(
+            lzl_source,
+            "lzl=1&tid=10955297834&pid=153847299771&pn=2",
+        )
+        self.assertIn("楼中楼用户", lzl_page)
+        self.assertIn("完整楼中楼内容", lzl_page)
+        self.assertIn("2026-8-19 14:56", lzl_page)
+        self.assertIn("共 107 条 · 第 2 / 11 页", lzl_page)
+        self.assertIn("pid=153847299771&amp;pn=1", lzl_page)
+        self.assertIn("pid=153847299771&amp;pn=3", lzl_page)
+        self.assertNotIn("贴吧原始分页", lzl_page)
+        self.assertNotIn(">回复</a>", lzl_page)
+
     def test_filter_removes_tieba_chrome_and_preserves_reading_content(self):
         source = """
         <!DOCTYPE html>
@@ -59,6 +95,7 @@ class TiebaFilterTests(unittest.TestCase):
           <div class="appPromote"><img alt="tieba_log">贴吧App 立即打开</div>
           <div class="jump_page_pop_common">跳页弹窗img立即启动</div>
           <article>
+           <li tid="153847299771" class="post_list_item">
             <img class="user_img" alt="头像" src="avatar.jpg">
             <a class="author" href="/home/main?un=test">贴吧用户_QJNt3D2</a>
             <time>2025-12-10</time>
@@ -70,13 +107,14 @@ class TiebaFilterTests(unittest.TestCase):
               </a>
               <img src="/editor/images/client/image_emoticon1.png">
             </div>
-            <div class="fr_list">
+            <div class="fr_list" data-list-count="107">
               <span class="floor_content">已展示的楼中楼应该保留</span>
-              <span class="lzl_cut_more_btn">打开APP查看53条评论</span>
+              <span class="lzl_cut_more_btn">打开APP查看105条评论</span>
             </div>
             <div class="father-cut-daoliu-normal-box">
               <button>打开贴吧App，查看全部53条评论</button>
             </div>
+           </li>
           </article>
         </body></html>
         """
@@ -85,7 +123,7 @@ class TiebaFilterTests(unittest.TestCase):
             source,
             base_url=(
                 "https://tieba.baidu.com/mo/q---1-3-0--2/m?"
-                "kw=%E5%AD%99%E7%AC%91%E5%B7%9D"
+                "kz=10955297834"
             ),
             rewrite_links=True,
         )
@@ -111,6 +149,8 @@ class TiebaFilterTests(unittest.TestCase):
             'href="file:/cgi-bin/tieba_filter.py?10955913270"',
             "正文链接",
             "已展示的楼中楼应该保留",
+            "查看全部 107 条楼中楼",
+            "?lzl=1&amp;tid=10955297834&amp;pid=153847299771&amp;pn=1",
         ):
             self.assertIn(useful, result)
 
