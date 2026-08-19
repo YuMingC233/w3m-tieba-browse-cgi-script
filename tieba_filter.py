@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 TIEBA_HOSTS = {"tieba.baidu.com", "www.tieba.baidu.com"}
 # These are legacy page endpoints, not a versioned or stability-guaranteed API.
 MOBILE_THREAD_URL = "https://tieba.baidu.com/mo/q---1-3-0--2/m"
-LZL_URL = "https://tieba.baidu.com/p/comment"
+LZL_URL = "https://tieba.baidu.com/mo/q---1-3-0--2/flr"
 CGI_URL = "file:/cgi-bin/tieba_filter.py?"
 
 DROP_CLASSES = {
@@ -423,19 +423,32 @@ def render_lzl_page(source: str, request_value: str) -> str:
     """Render one page of nested replies with ordinary CGI pagination links."""
 
     thread_id, parent_post_id, page = _lzl_request_params(request_value)
-    decoded_source = html.unescape(source)
-    total_num_match = re.search(r'"total_num"\s*:\s*(\d+)', decoded_source)
-    total_page_match = re.search(r'"total_page"\s*:\s*(\d+)', decoded_source)
-    total_num = int(total_num_match.group(1)) if total_num_match else None
-    total_page = int(total_page_match.group(1)) if total_page_match else None
+    try:
+        payload = json.loads(source)
+        data = payload["data"]
+        page_data = data["page"]
+        floor_html = data["floor_html"]
+        total_num = page_data["total_num"]
+        total_page = page_data["total_page"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise FetchError("贴吧楼中楼接口返回了无法识别的数据") from exc
+
+    if (
+        not isinstance(payload, dict)
+        or payload.get("no") != 0
+        or not isinstance(floor_html, str)
+        or not isinstance(total_num, int)
+        or not isinstance(total_page, int)
+    ):
+        raise FetchError("贴吧楼中楼接口返回异常")
 
     upstream_url = (
         f"{LZL_URL}?"
         + urllib.parse.urlencode(
-            {"tid": thread_id, "pid": parent_post_id, "pn": page}
+            {"pid": parent_post_id, "kz": thread_id, "pn": 1, "fpn": page}
         )
     )
-    content = filter_tieba_html(source, base_url=upstream_url)
+    content = filter_tieba_html(floor_html, base_url=upstream_url)
 
     def page_href(target_page: int) -> str:
         query = urllib.parse.urlencode(
@@ -451,12 +464,8 @@ def render_lzl_page(source: str, request_value: str) -> str:
     links: list[str] = []
     if page > 1:
         links.append(f'<a href="{page_href(page - 1)}">上一页</a>')
-    if total_num is not None and total_page is not None:
-        links.append(f"共 {total_num} 条 · 第 {page} / {total_page} 页")
-        has_next = page < total_page
-    else:
-        links.append(f"第 {page} 页")
-        has_next = bool(content.strip())
+    links.append(f"共 {total_num} 条 · 第 {page} / {total_page} 页")
+    has_next = page < total_page
     if has_next:
         links.append(f'<a href="{page_href(page + 1)}">下一页</a>')
 
@@ -475,7 +484,7 @@ def _build_upstream_url(request_value: str) -> str:
         return (
             f"{LZL_URL}?"
             + urllib.parse.urlencode(
-                {"tid": thread_id, "pid": parent_post_id, "pn": page}
+                {"pid": parent_post_id, "kz": thread_id, "pn": 1, "fpn": page}
             )
         )
 

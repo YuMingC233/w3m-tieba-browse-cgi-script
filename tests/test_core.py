@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from tieba_filter import (
@@ -55,36 +56,37 @@ class TiebaFilterTests(unittest.TestCase):
             _build_upstream_url(
                 "lzl=1&tid=10955297834&pid=153847299771&pn=2"
             ),
-            "https://tieba.baidu.com/p/comment?"
-            "tid=10955297834&pid=153847299771&pn=2",
+            "https://tieba.baidu.com/mo/q---1-3-0--2/flr?"
+            "pid=153847299771&kz=10955297834&pn=1&fpn=2",
         )
         with self.assertRaises(ValueError):
             _build_upstream_url("lzl=1&tid=10955297834&pid=invalid&pn=1")
 
-        lzl_source = """
-        <li class="lzl_single_post j_lzl_s_p">
-          <a class="at j_user_card">楼中楼用户</a>:
-          <span class="lzl_content_main">完整楼中楼内容</span>
-          <div class="lzl_content_reply">
-            <span class="lzl_time">2026-8-19 14:56</span>
-            <a class="lzl_s_r" href="#">回复</a>
-          </div>
-        </li>
-        <li class="lzl_li_pager" data-field="{&quot;total_num&quot;:107,
-        &quot;total_page&quot;:11}">贴吧原始分页</li>
-        """
+        lzl_source = json.dumps(
+            {
+                "no": 0,
+                "data": {
+                    "page": {"total_num": 107, "total_page": 11},
+                    "floor_html": (
+                        '<li class="list_item_floor">'
+                        '<a class="user_name">楼中楼用户:</a>'
+                        '<span class="floor_content">完整楼中楼内容</span>'
+                        "</li>"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        )
         lzl_page = render_lzl_page(
             lzl_source,
             "lzl=1&tid=10955297834&pid=153847299771&pn=2",
         )
         self.assertIn("楼中楼用户", lzl_page)
         self.assertIn("完整楼中楼内容", lzl_page)
-        self.assertIn("2026-8-19 14:56", lzl_page)
         self.assertIn("共 107 条 · 第 2 / 11 页", lzl_page)
         self.assertIn("pid=153847299771&amp;pn=1", lzl_page)
         self.assertIn("pid=153847299771&amp;pn=3", lzl_page)
-        self.assertNotIn("贴吧原始分页", lzl_page)
-        self.assertNotIn(">回复</a>", lzl_page)
+        self.assertNotIn("floor_html", lzl_page)
 
     def test_filter_removes_tieba_chrome_and_preserves_reading_content(self):
         source = """
