@@ -9,6 +9,7 @@ from tieba_filter import (
     filter_tieba_html,
     render_lzl_page,
 )
+from tieba_cli.parsing import parse_lzl_page, parse_thread_page
 
 
 class TiebaFilterTests(unittest.TestCase):
@@ -160,19 +161,27 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertIn("pid=153847299771&amp;pn=3", lzl_page)
         self.assertNotIn("floor_html", lzl_page)
 
+        parsed_lzl = parse_lzl_page(lzl_source)
+        self.assertEqual(parsed_lzl.total_replies, 107)
+        self.assertEqual(parsed_lzl.total_pages, 11)
+        self.assertEqual(parsed_lzl.replies[0].author, "楼中楼用户")
+        self.assertEqual(parsed_lzl.replies[0].content, "完整楼中楼内容")
+
     def test_filter_removes_tieba_chrome_and_preserves_reading_content(self):
         source = """
         <!DOCTYPE html>
-        <html><body>
+        <html><head><title>值得讨论的测试帖子</title></head><body>
           <div class="wake_app_tip">取消</div>
           <div class="pb_new_popup">设置精华贴 取消 完成</div>
           <div class="appPromote"><img alt="tieba_log">贴吧App 立即打开</div>
           <div class="jump_page_pop_common">跳页弹窗img立即启动</div>
           <article>
-           <li tid="153847299771" class="post_list_item">
+           <a class="post_title_text">孙笑川吧</a>
+           <li tid="153847299771" fn="11" class="post_list_item"
+               data-info='{"name_show":"贴吧用户_QJNt3D2"}'>
             <img class="user_img" alt="头像" src="avatar.jpg">
             <a class="author" href="/home/main?un=test">贴吧用户_QJNt3D2</a>
-            <time>2025-12-10</time>
+            <span class="list_item_time">2025-12-10</span>
             <div class="list_item_more_operation">操作 收藏 回复 举报</div>
             <div class="content">
               正文应该保留
@@ -180,9 +189,13 @@ class TiebaFilterTests(unittest.TestCase):
                 正文链接
               </a>
               <img src="/editor/images/client/image_emoticon1.png">
+              <div class="img_desc">下载贴吧APP，马上闯入高清视界</div>
             </div>
             <div class="fr_list" data-list-count="107">
-              <span class="floor_content">已展示的楼中楼应该保留</span>
+              <li pid="153847300001" class="list_item_floor">
+                <a class="user_name">楼中楼用户:</a>
+                <span class="floor_content">已展示的楼中楼应该保留</span>
+              </li>
               <span class="lzl_cut_more_btn">打开APP查看105条评论</span>
             </div>
             <div class="father-cut-daoliu-normal-box">
@@ -190,7 +203,10 @@ class TiebaFilterTests(unittest.TestCase):
             </div>
            </li>
           </article>
-        </body></html>
+        <script>
+        conf: {page: {"page_size":30,"offset":0,"current_page":1,
+        "total_page":19,"total_num":570}}
+        </script></body></html>
         """
 
         result = filter_tieba_html(
@@ -227,6 +243,28 @@ class TiebaFilterTests(unittest.TestCase):
             "?lzl=1&amp;tid=10955297834&amp;pid=153847299771&amp;pn=1",
         ):
             self.assertIn(useful, result)
+
+        page = parse_thread_page(source, "10955297834")
+        self.assertEqual(page.title, "值得讨论的测试帖子")
+        self.assertEqual(page.forum_name, "孙笑川")
+        self.assertEqual(page.page_size, 30)
+        self.assertEqual(page.total_pages, 19)
+        self.assertEqual(page.total_posts, 570)
+        self.assertEqual(len(page.posts), 1)
+        post = page.posts[0]
+        self.assertEqual(post.pid, "153847299771")
+        self.assertEqual(post.floor, 11)
+        self.assertEqual(post.author, "贴吧用户_QJNt3D2")
+        self.assertEqual(post.posted_at, "2025-12-10")
+        self.assertIn("正文应该保留", post.content)
+        self.assertNotIn("下载贴吧APP", post.content)
+        self.assertEqual(post.nested_reply_count, 107)
+        self.assertEqual(post.nested_replies[0].pid, "153847300001")
+        self.assertEqual(post.nested_replies[0].author, "楼中楼用户")
+        self.assertEqual(
+            post.nested_replies[0].content,
+            "已展示的楼中楼应该保留",
+        )
 
 
 if __name__ == "__main__":
