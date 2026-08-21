@@ -74,6 +74,8 @@ Read `thread.json` selectively. For a large thread, search `posts.jsonl` for rel
 
 Use `content_text` for quoting, searching, and ordinary discussion. Preserve the `content` array when inspecting images, links, mentions, emoticons, or other rich elements; image URLs normally live under fields such as `media[].origin_src`. Do not mistake `[图片]` in `content_text` for the complete image record.
 
+Use `thread.owner` and each record's `is_thread_owner` field to identify the original poster. Do not infer ownership merely from a repeated display name when `thread.owner.status` is `unknown`. A `manual_override` source means the user explicitly corrected the identity in a previous snapshot.
+
 When answering:
 
 - identify main-post evidence by floor and `pid`, for example `第 31 楼（pid 100002）`;

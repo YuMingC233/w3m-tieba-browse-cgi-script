@@ -814,6 +814,108 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertEqual(restored["update"]["state"], "active")
         self.assertEqual(restored["update"]["consecutive_not_found"], 0)
 
+    def test_thread_owner_is_detected_and_manual_override_is_propagated(self):
+        class OwnerClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                return ThreadPage(
+                    thread_id=thread_id,
+                    title="楼主识别测试",
+                    forum_name="测试",
+                    page_size=4,
+                    offset=0,
+                    current_page=1,
+                    total_pages=1,
+                    total_posts=4,
+                    posts=[
+                        Post(
+                            pid="100001",
+                            floor=1,
+                            author="原楼主",
+                            author_id="1",
+                            posted_at="1770000000",
+                            content_text="主题帖",
+                        ),
+                        Post(
+                            pid="100002",
+                            floor=2,
+                            author="原楼主",
+                            author_id="1",
+                            posted_at="1770000001",
+                            content_text="楼主回复",
+                        ),
+                        Post(
+                            pid="100003",
+                            floor=3,
+                            author="应手动指定的人",
+                            author_id="2",
+                            posted_at="1770000002",
+                            content_text="手动标记这层",
+                            nested_reply_count=1,
+                            nested_replies=[NestedReply(
+                                pid="200001",
+                                author="应手动指定的人",
+                                author_id="2",
+                                content_text="同作者楼中楼",
+                            )],
+                        ),
+                        Post(
+                            pid="100004",
+                            floor=4,
+                            author="应手动指定的人",
+                            author_id="2",
+                            posted_at="1770000003",
+                            content_text="同作者另一层",
+                        ),
+                    ],
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            result_path = export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="current",
+                current_client=OwnerClient(),
+            )
+            automatic = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(automatic["thread"]["owner"], {
+                "status": "detected",
+                "source": "first_floor",
+                "author_id": "1",
+                "author": "原楼主",
+                "match_by": "author_id",
+            })
+            self.assertEqual(
+                [post["is_thread_owner"] for post in automatic["posts"]],
+                [True, True, False, False],
+            )
+
+            automatic["posts"][2]["thread_owner_override"] = True
+            result_path.write_text(
+                json.dumps(automatic, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="current",
+                current_client=OwnerClient(),
+            )
+            overridden = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(overridden["thread"]["owner"]["source"], "manual_override")
+        self.assertEqual(overridden["thread"]["owner"]["author_id"], "2")
+        self.assertEqual(
+            [post["is_thread_owner"] for post in overridden["posts"]],
+            [False, False, True, True],
+        )
+        self.assertTrue(overridden["posts"][2]["thread_owner_override"])
+        self.assertTrue(
+            overridden["posts"][2]["nested_replies"][0]["is_thread_owner"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

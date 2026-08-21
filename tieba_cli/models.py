@@ -15,6 +15,7 @@ class NestedReply:
     content_html: str = ""
     author_id: str = ""
     posted_at: str = ""
+    is_thread_owner: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -32,9 +33,14 @@ class Post:
     author_id: str = ""
     nested_reply_count: int = 0
     nested_replies: list[NestedReply] = field(default_factory=list)
+    is_thread_owner: bool = False
+    thread_owner_override: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.thread_owner_override is None:
+            value.pop("thread_owner_override")
+        return value
 
 
 @dataclass

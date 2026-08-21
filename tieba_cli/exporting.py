@@ -20,6 +20,7 @@ from .lifecycle import (
     normalize_update_state,
 )
 from .models import NestedReply, Post, ThreadPage
+from .ownership import apply_thread_owner
 from .parsing import parse_lzl_page, parse_thread_page
 from .routing import extract_thread_id
 
@@ -81,6 +82,7 @@ def _post_from_dict(value: dict[str, object]) -> Post:
                 else [{"type": "text", "text": str(reply.get("content", ""))}]
             ),
             content_html=str(reply.get("content_html", "")),
+            is_thread_owner=bool(reply.get("is_thread_owner", False)),
         )
         for reply in nested_values
         if isinstance(reply, dict)
@@ -109,6 +111,12 @@ def _post_from_dict(value: dict[str, object]) -> Post:
             else 0
         ),
         nested_replies=nested_replies,
+        is_thread_owner=bool(value.get("is_thread_owner", False)),
+        thread_owner_override=(
+            value.get("thread_owner_override")
+            if isinstance(value.get("thread_owner_override"), bool)
+            else None
+        ),
     )
 
 
@@ -156,6 +164,18 @@ def _load_update_state(export_dir: Path) -> dict[str, object]:
         if isinstance(export, dict):
             return normalize_update_state(export.get("update"))
     return normalize_update_state(None)
+
+
+def _load_previous_result_posts(export_dir: Path) -> list[Post]:
+    result_path = export_dir / "thread.json"
+    if not result_path.exists():
+        return []
+    values = _read_json(result_path).get("posts")
+    if not isinstance(values, list):
+        return []
+    return [
+        _post_from_dict(value) for value in values if isinstance(value, dict)
+    ]
 
 
 def _sync_update_state(
@@ -354,6 +374,7 @@ def _export_legacy_thread(
     refresh_existing: bool = False,
     full_refresh_lzl: bool = False,
     previous_update: object = None,
+    previous_result_posts: list[Post] | None = None,
 ) -> Path:
     """Export every main-thread page and optionally every nested reply."""
 
@@ -462,6 +483,7 @@ def _export_legacy_thread(
                 refresh_pids,
             )
 
+        owner = apply_thread_owner(posts, previous_result_posts or [])
         _atomic_write_jsonl(
             export_dir / "posts.jsonl",
             [post.to_dict() for post in posts],
@@ -477,6 +499,7 @@ def _export_legacy_thread(
                 "page_size": page_size,
                 "total_pages": total_pages,
                 "total_posts": first_page.total_posts,
+                "owner": owner,
             },
             "export": {
                 "status": "complete",
@@ -551,6 +574,7 @@ def _export_current_thread(
     refresh_existing: bool = False,
     full_refresh_lzl: bool = False,
     previous_update: object = None,
+    previous_result_posts: list[Post] | None = None,
 ) -> Path:
     thread_id = extract_thread_id(value)
     export_dir = _resolve_output_dir(thread_id, output_dir)
@@ -686,6 +710,7 @@ def _export_current_thread(
                 manifest["updated_at"] = _timestamp()
                 _atomic_write_json(manifest_path, manifest)
 
+        owner = apply_thread_owner(posts, previous_result_posts or [])
         _atomic_write_jsonl(
             export_dir / "posts.jsonl", [post.to_dict() for post in posts]
         )
@@ -699,6 +724,7 @@ def _export_current_thread(
                 "forum_name": first_page.forum_name,
                 "total_pages": total_pages,
                 "total_posts": first_page.total_posts,
+                "owner": owner,
             },
             "export": {
                 "status": "complete",
@@ -752,6 +778,7 @@ def export_thread(
     export_dir = _resolve_output_dir(thread_id, output_dir)
     result_path = export_dir / "thread.json"
     previous_update = _load_update_state(export_dir)
+    previous_result_posts = _load_previous_result_posts(export_dir)
     if (
         previous_update.get("state") == "archived"
         and result_path.exists()
@@ -780,6 +807,7 @@ def export_thread(
                 refresh_existing=refresh_existing,
                 full_refresh_lzl=full_refresh_lzl,
                 previous_update=previous_update,
+                previous_result_posts=previous_result_posts,
             )
         except FetchError as exc:
             current_error = exc
@@ -805,6 +833,7 @@ def export_thread(
             refresh_existing=refresh_existing,
             full_refresh_lzl=full_refresh_lzl,
             previous_update=previous_update,
+            previous_result_posts=previous_result_posts,
         )
     except FetchError as legacy_error:
         if not result_path.exists():

@@ -218,8 +218,31 @@ python -m tieba_cli export 10955297834 \
 - `content_text`：便于 Agent、全文检索和终端阅读的纯文本；
 - `content`：富内容数组。新版接口返回的每个对象会原样保留，包括图片 `media[].origin_src`、尺寸、表情、@用户、链接及尚未识别的字段；
 - `content_html`：使用旧移动端回退时保留的正文 HTML，便于未来前端重建图片、链接和格式。
+- `is_thread_owner`：该内容作者是否为帖子楼主，主楼层与楼中楼都会生成。
 
 图片文件本身不会被下载；归档保留的是百度响应中的 URL 和相关元数据。Cookie、`tbs` 和请求签名不会写入归档。
+
+### 楼主识别与手动纠正
+
+程序默认使用 `floor == 1` 的作者识别楼主，优先按 `author_id` 匹配该作者的其他主楼层和楼中楼；旧接口没有作者 ID 时退回精确用户名匹配。识别结果记录在 `thread.owner`：
+
+```json
+{
+  "status": "detected",
+  "source": "first_floor",
+  "author_id": "123456",
+  "author": "示例用户",
+  "match_by": "author_id"
+}
+```
+
+如果接口没有返回首楼，`status` 会是 `unknown`，程序不会猜测楼主。如果自动结果有误，打开已经导出的 `thread.json`，在正确作者的任意一个主楼层对象中手动加入：
+
+```json
+"thread_owner_override": true
+```
+
+再次执行原导出命令后，程序会读取该字段，将同一作者的所有主楼层和楼中楼标记为 `is_thread_owner: true`，并把 `thread.owner.source` 改为 `manual_override`。手动字段必须是 JSON 布尔值 `true`，不能写成字符串 `"true"`。如果不同作者同时带有手动标记，程序会报错而不会任选其中一个；删除错误标记、只保留正确作者的一个标记后再执行即可。
 
 正文页中的已展示楼中楼会直接保留。如果讨论必须包含全部楼中楼，可显式启用：
 
