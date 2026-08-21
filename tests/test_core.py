@@ -72,6 +72,57 @@ class TiebaFilterTests(unittest.TestCase):
             "?10955297834&amp;pn=60&amp;see_lz=1",
             thread_paginated,
         )
+        self.assertIn('name="page"', thread_paginated)
+        self.assertIn('name="page_size" value="30"', thread_paginated)
+        self.assertIn('name="total_page" value="19"', thread_paginated)
+        self.assertIn(
+            "?10955297834&amp;pn=510&amp;see_lz=1&amp;r=1",
+            thread_paginated,
+        )
+
+        self.assertEqual(
+            _build_upstream_url(
+                "kz=10955297834&page=7&page_size=30&total_page=19"
+            ),
+            "https://tieba.baidu.com/mo/q---1-3-0--2/m?"
+            "kz=10955297834&pn=180",
+        )
+        self.assertEqual(
+            _build_upstream_url(
+                "kz=10955297834&page=7&page_size=30&total_page=19&r=1"
+            ),
+            "https://tieba.baidu.com/mo/q---1-3-0--2/m?"
+            "kz=10955297834&pn=360&r=1",
+        )
+        with self.assertRaises(ValueError):
+            _build_upstream_url(
+                "kz=10955297834&page=20&page_size=30&total_page=19"
+            )
+
+        reverse_source = """
+        <html><body>倒序帖子正文<script>
+        conf: {page: {"page_size":30,"offset":510,"current_page":18,
+        "total_page":19}}
+        </script></body></html>
+        """
+        reverse_paginated = add_thread_pagination(
+            reverse_source,
+            "10955297834&pn=510&see_lz=1&r=1",
+        )
+        self.assertIn("倒序 · 第 2 / 19 页", reverse_paginated)
+        self.assertIn(
+            "?10955297834&amp;pn=540&amp;see_lz=1&amp;r=1",
+            reverse_paginated,
+        )
+        self.assertIn(
+            "?10955297834&amp;pn=480&amp;see_lz=1&amp;r=1",
+            reverse_paginated,
+        )
+        self.assertIn(
+            "?10955297834&amp;pn=30&amp;see_lz=1",
+            reverse_paginated,
+        )
+        self.assertIn('name="r" value="1"', reverse_paginated)
 
         self.assertEqual(
             _build_upstream_url(

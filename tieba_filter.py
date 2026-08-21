@@ -121,6 +121,41 @@ def _safe_upstream_params(value: str) -> dict[str, str]:
     return params
 
 
+def _request_query_params(value: str) -> dict[str, list[str]]:
+    decoded = html.unescape(value).strip()
+    parsed = urllib.parse.urlsplit(decoded)
+    query = parsed.query if parsed.scheme or parsed.netloc else decoded.removeprefix("?")
+    return urllib.parse.parse_qs(query, keep_blank_values=True)
+
+
+def _thread_jump_offset(value: str) -> int | None:
+    """Convert a submitted logical thread page into Baidu's physical offset."""
+
+    params = _request_query_params(value)
+    if "page" not in params:
+        return None
+
+    page_value = params.get("page", [""])[0]
+    page_size_value = params.get("page_size", [""])[0]
+    total_page_value = params.get("total_page", [""])[0]
+    if not re.fullmatch(r"[1-9]\d*", page_value):
+        raise ValueError("帖子页码必须是正整数")
+    if not re.fullmatch(r"[1-9]\d*", page_size_value):
+        raise ValueError("帖子分页大小无效")
+    if not re.fullmatch(r"[1-9]\d*", total_page_value):
+        raise ValueError("帖子总页数无效")
+
+    page = int(page_value)
+    page_size = int(page_size_value)
+    total_page = int(total_page_value)
+    if page > total_page:
+        raise ValueError(f"帖子页码超出范围，当前共 {total_page} 页")
+
+    reverse_order = params.get("r", ["0"])[0] == "1"
+    physical_page = total_page - page if reverse_order else page - 1
+    return physical_page * page_size
+
+
 def _forum_request_params(value: str) -> tuple[str, int]:
     """Return the forum name and zero-based list offset from a list request."""
 
@@ -441,33 +476,87 @@ def add_thread_pagination(source: str, request_value: str) -> str:
     if not isinstance(offset, int) or offset < 0:
         offset = requested_offset
 
-    current_page = offset // page_size + 1
+    upstream_current_page = offset // page_size + 1
     if isinstance(page_data.get("current_page"), int):
-        current_page = int(page_data["current_page"])
+        upstream_current_page = int(page_data["current_page"])
 
-    def page_href(page_offset: int) -> str:
+    reverse_order = request_params.get("r") == "1"
+    total_page_known = isinstance(total_page, int) and total_page > 0
+    if reverse_order and total_page_known:
+        current_page = total_page - upstream_current_page + 1
+    else:
+        current_page = upstream_current_page
+
+    def page_href(page_offset: int, *, reverse: bool = reverse_order) -> str:
         params = {"pn": str(page_offset)}
-        for name in ("see_lz", "r"):
-            if name in request_params:
-                params[name] = request_params[name]
+        if "see_lz" in request_params:
+            params["see_lz"] = request_params["see_lz"]
+        if reverse:
+            params["r"] = "1"
         query = thread_id + "&" + urllib.parse.urlencode(params)
         return html.escape(f"{CGI_URL}{query}", quote=True)
 
     links: list[str] = []
-    if offset > 0:
-        links.append(f'<a href="{page_href(max(0, offset - page_size))}">上一页</a>')
+    if current_page > 1:
+        previous_offset = (
+            offset + page_size if reverse_order else max(0, offset - page_size)
+        )
+        links.append(f'<a href="{page_href(previous_offset)}">上一页</a>')
 
-    if isinstance(total_page, int) and total_page > 0:
-        links.append(f"第 {current_page} / {total_page} 页")
+    order_prefix = "倒序 · " if reverse_order else ""
+    if total_page_known:
+        links.append(f"{order_prefix}第 {current_page} / {total_page} 页")
         has_next = current_page < total_page
     else:
-        links.append(f"第 {current_page} 页")
+        links.append(f"{order_prefix}第 {current_page} 页")
         has_next = True
 
     if has_next:
-        links.append(f'<a href="{page_href(offset + page_size)}">下一页</a>')
+        next_offset = (
+            max(0, offset - page_size) if reverse_order else offset + page_size
+        )
+        links.append(f'<a href="{page_href(next_offset)}">下一页</a>')
 
-    pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p></nav>"
+    controls: list[str] = []
+    if total_page_known:
+        if reverse_order:
+            normal_offset = (current_page - 1) * page_size
+            controls.append(
+                f'<a href="{page_href(normal_offset, reverse=False)}">正序查看</a>'
+            )
+        else:
+            reverse_offset = (total_page - current_page) * page_size
+            controls.append(
+                f'<a href="{page_href(reverse_offset, reverse=True)}">倒序查看</a>'
+            )
+
+        hidden_fields = [
+            f'<input type="hidden" name="kz" value="{thread_id}">',
+            f'<input type="hidden" name="page_size" value="{page_size}">',
+            f'<input type="hidden" name="total_page" value="{total_page}">',
+        ]
+        if "see_lz" in request_params:
+            hidden_fields.append(
+                '<input type="hidden" name="see_lz" value="'
+                + html.escape(request_params["see_lz"], quote=True)
+                + '">'
+            )
+        if reverse_order:
+            hidden_fields.append('<input type="hidden" name="r" value="1">')
+
+        form_action = html.escape(CGI_URL.removesuffix("?"), quote=True)
+        controls.append(
+            f'<form action="{form_action}" method="get">'
+            + "".join(hidden_fields)
+            + '<label>跳转到第 <input type="text" inputmode="numeric" '
+            + f'name="page" size="4" value="{current_page}"> 页</label> '
+            + '<input type="submit" value="跳转"></form>'
+        )
+
+    pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p>"
+    if controls:
+        pager += f"<p>{controls[0]}</p>" + "".join(controls[1:])
+    pager += "</nav>"
     body_end = source.lower().rfind("</body>")
     if body_end >= 0:
         return source[:body_end] + pager + source[body_end:]
@@ -551,7 +640,13 @@ def _build_upstream_url(request_value: str) -> str:
         return f"{MOBILE_THREAD_URL}?{urllib.parse.urlencode(params)}"
 
     params = {"kz": extract_thread_id(request_value)}
-    params.update(_safe_upstream_params(request_value))
+    safe_params = _safe_upstream_params(request_value)
+    jump_offset = _thread_jump_offset(request_value)
+    if jump_offset is not None:
+        safe_params["pn"] = str(jump_offset)
+    for name in SAFE_UPSTREAM_PARAMS:
+        if name in safe_params:
+            params[name] = safe_params[name]
     return f"{MOBILE_THREAD_URL}?{urllib.parse.urlencode(params)}"
 
 
