@@ -15,7 +15,9 @@ from tieba_filter import (
 )
 from tieba_cli.parsing import parse_lzl_page, parse_thread_page
 from tieba_cli.exporting import export_thread
-from tieba_cli.current_api import CurrentTiebaClient
+from tieba_cli.current_api import CurrentNestedReplyPage, CurrentTiebaClient
+from tieba_cli.errors import ThreadNotFoundError
+from tieba_cli.models import NestedReply, Post, ThreadPage
 
 
 class TiebaFilterTests(unittest.TestCase):
@@ -258,7 +260,10 @@ class TiebaFilterTests(unittest.TestCase):
                 fetcher=fake_fetch,
             )
             self.assertEqual(cached_path, result_path)
-            self.assertEqual(len(fetch_calls), first_fetch_count)
+            self.assertEqual(
+                fetch_calls[first_fetch_count:],
+                ["10955297834", "10955297834&pn=30"],
+            )
 
             resume_dir = Path(temp_dir) / "resume"
             failed_once = False
@@ -591,6 +596,223 @@ class TiebaFilterTests(unittest.TestCase):
             "https://imgsrc.baidu.com/forum/pic/item/legacy-full.jpg",
         )
         self.assertIn("legacy.jpg", exported["posts"][0]["content_html"])
+
+    def test_completed_export_refreshes_new_posts_and_changed_nested_replies(self):
+        class UpdatingClient:
+            generation = 1
+
+            def __init__(self):
+                self.page_calls = []
+                self.nested_calls = []
+
+            def fetch_thread_page(self, thread_id, page_number):
+                self.page_calls.append((self.generation, page_number))
+                first = Post(
+                    pid="100001",
+                    floor=1,
+                    author="楼主",
+                    posted_at="1770000000",
+                    content_text="更新后的正文" if self.generation == 2 else "原正文",
+                    content=[{
+                        "type": 0,
+                        "text": "更新后的正文" if self.generation == 2 else "原正文",
+                    }],
+                    nested_reply_count=self.generation,
+                    nested_replies=[NestedReply(
+                        pid="200001",
+                        author="甲",
+                        content_text="第一条楼中楼",
+                    )],
+                )
+                posts = [first]
+                if self.generation == 2:
+                    posts.append(Post(
+                        pid="100002",
+                        floor=2,
+                        author="乙",
+                        posted_at="1770000002",
+                        content_text="新增楼层",
+                    ))
+                return ThreadPage(
+                    thread_id=thread_id,
+                    title="增量更新测试",
+                    forum_name="测试",
+                    page_size=len(posts),
+                    offset=0,
+                    current_page=1,
+                    total_pages=1,
+                    total_posts=len(posts),
+                    posts=posts,
+                )
+
+            def fetch_nested_page(self, thread_id, post_id, offset):
+                self.nested_calls.append((post_id, offset))
+                return CurrentNestedReplyPage(
+                    replies=[NestedReply(
+                        pid="200002",
+                        author="丙",
+                        content_text="新增楼中楼",
+                    )],
+                    next_offset=2,
+                    has_more=False,
+                )
+
+        client = UpdatingClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            result_path = export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                include_lzl=True,
+                delay=0,
+                source="current",
+                current_client=client,
+            )
+            client.generation = 2
+            refreshed_path = export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                include_lzl=True,
+                delay=0,
+                source="current",
+                current_client=client,
+            )
+            exported = json.loads(refreshed_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(refreshed_path, result_path)
+        self.assertEqual(client.page_calls, [(1, 1), (2, 1)])
+        self.assertEqual(client.nested_calls, [("100001", 1)])
+        self.assertEqual(exported["thread"]["total_posts"], 2)
+        self.assertEqual(exported["posts"][0]["content_text"], "更新后的正文")
+        self.assertEqual(len(exported["posts"][0]["nested_replies"]), 2)
+        self.assertEqual(exported["posts"][1]["content_text"], "新增楼层")
+        self.assertEqual(manifest["update"]["state"], "active")
+        self.assertEqual(exported["export"]["update"]["state"], "active")
+
+    def test_update_failures_are_not_archived_until_repeated_dual_not_found(self):
+        class WorkingClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                return ThreadPage(
+                    thread_id=thread_id,
+                    title="归档状态测试",
+                    forum_name="测试",
+                    page_size=1,
+                    offset=0,
+                    current_page=1,
+                    total_pages=1,
+                    total_posts=1,
+                    posts=[Post(
+                        pid="100001",
+                        floor=1,
+                        author="楼主",
+                        posted_at="1770000000",
+                        content_text="仍需保留的正文",
+                    )],
+                )
+
+        class FailedClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                raise FetchError("模拟 Cookie 过期")
+
+        class MissingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_thread_page(self, thread_id, page_number):
+                self.calls += 1
+                raise ThreadNotFoundError("新版接口明确返回 404")
+
+        legacy_calls = []
+
+        def missing_legacy(request_value):
+            legacy_calls.append(request_value)
+            raise ThreadNotFoundError("旧版接口明确返回 404")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            result_path = export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="current",
+                current_client=WorkingClient(),
+            )
+
+            cached_path = export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="current",
+                current_client=FailedClient(),
+            )
+            self.assertEqual(cached_path, result_path)
+            manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["update"]["state"], "check_failed")
+            self.assertEqual(manifest["update"]["consecutive_not_found"], 0)
+
+            missing_client = MissingClient()
+            export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="auto",
+                current_client=missing_client,
+                fetcher=missing_legacy,
+            )
+            first_missing = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(first_missing["update"]["state"], "check_failed")
+            self.assertEqual(first_missing["update"]["consecutive_not_found"], 1)
+
+            export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="auto",
+                current_client=missing_client,
+                fetcher=missing_legacy,
+            )
+            archived = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            archived_result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(archived["update"]["state"], "archived")
+            self.assertEqual(archived_result["export"]["update"]["state"], "archived")
+            self.assertTrue(archived["update"]["archived_at"])
+
+            calls_before_skip = (missing_client.calls, len(legacy_calls))
+            export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="auto",
+                current_client=missing_client,
+                fetcher=missing_legacy,
+            )
+            self.assertEqual(
+                (missing_client.calls, len(legacy_calls)), calls_before_skip
+            )
+
+            export_thread(
+                "10955297834",
+                output_dir=output_dir,
+                delay=0,
+                source="current",
+                current_client=WorkingClient(),
+                force_refresh=True,
+            )
+            restored = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(restored["update"]["state"], "active")
+        self.assertEqual(restored["update"]["consecutive_not_found"], 0)
 
 
 if __name__ == "__main__":

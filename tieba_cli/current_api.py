@@ -17,7 +17,7 @@ from .constants import (
     CURRENT_PC_SIGN_SALT,
     CURRENT_THREAD_URL,
 )
-from .errors import FetchError
+from .errors import FetchError, ThreadNotFoundError
 from .models import NestedReply, Post, ThreadPage
 
 
@@ -133,6 +133,14 @@ class CurrentTiebaClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ThreadNotFoundError(
+                    "贴吧新版接口明确返回 404，帖子可能已被删除"
+                ) from exc
+            raise FetchError(
+                f"贴吧新版接口请求失败：HTTP {exc.code} {path}"
+            ) from exc
         except (OSError, urllib.error.URLError) as exc:
             raise FetchError(f"贴吧新版接口请求失败：{path}") from exc
         try:

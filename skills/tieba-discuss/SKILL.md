@@ -46,7 +46,7 @@ In `auto` mode it may fall back to these legacy endpoints:
 - `/mo/q---1-3-0--2/m` for thread pages;
 - `/mo/q---1-3-0--2/flr` for nested replies.
 
-Never replace them with an unverified endpoint, browser automation, ad-hoc Cookie handling, or a CAPTCHA bypass. A `/p/` URL is acceptable only as user input from which to extract the ID. The exporter owns Cookie access and signing. If both sources fail or Baidu returns a safety-verification page, stop and report it; the same command can resume from cached pages later.
+Never replace them with an unverified endpoint, browser automation, ad-hoc Cookie handling, or a CAPTCHA bypass. A `/p/` URL is acceptable only as user input from which to extract the ID. The exporter owns Cookie access and signing. If both sources fail or Baidu returns a safety-verification page, inspect the update state before using an existing snapshot.
 
 ## Check completeness
 
@@ -58,8 +58,15 @@ Only analyze the export as complete when all of these conditions hold:
 - `export.status` is `complete`;
 - `export.source` is either `current` or `legacy`, and `export.source_endpoint` matches it;
 - `export.include_lzl` is true when full nested replies were required.
+- `export.update.state` is `active` when current content is required.
 
-If the command fails, inspect `manifest.json`. State that the snapshot is incomplete and identify the resumable export directory. Do not silently analyze a partial cache as if it represented the whole thread.
+For an existing complete snapshot, an update failure returns the preserved `thread.json` path rather than discarding useful content. Inspect `export.update` or `manifest.json`:
+
+- `check_failed` means the snapshot is usable historical material, but the latest check was inconclusive. Report that limitation instead of calling it current or deleted.
+- `archived` means two consecutive checks found explicit not-found evidence from both current and legacy sources. The exporter skips future checks by default.
+- Use `--force-refresh` only when the user wants an archived snapshot checked again.
+
+Nested-reply counts cannot reveal same-count edits or a delete-and-replace pair. When that distinction matters, rerun with `--full-refresh-lzl --delay 1.5`; this implies complete nested-reply export. If the initial command fails before `thread.json` exists, inspect `manifest.json`, state that the snapshot is incomplete, and identify the resumable export directory. Do not silently analyze a partial cache as if it represented the whole thread.
 
 ## Discuss from evidence
 

@@ -178,7 +178,7 @@ w3m 'file:/cgi-bin/tieba_filter.py?10955297834&pn=30'
 python -m tieba_cli export 10955297834 --source current
 ```
 
-`current` 模式在 Cookie 失效或接口变更时会直接报错。确认配置可用后，日常可使用默认的 `auto`：
+`current` 模式在首次导出时遇到 Cookie 失效或接口变更会直接报错；已有完整快照时则保留旧 JSON，并把更新状态标记为 `check_failed`。确认配置可用后，日常可使用默认的 `auto`：
 
 ```bash
 python -m tieba_cli export 10955297834
@@ -229,7 +229,41 @@ python -m tieba_cli export 10955297834 \
   --delay 1.5
 ```
 
-`--include-lzl` 可能产生很多请求，也更容易遇到百度安全验证，所以默认关闭。`--delay` 控制连续请求的最小间隔，默认 1 秒。导出遇到验证、网络错误或手动中断后，重新执行同一命令会复用已经成功写入的逐页缓存；已经完整导出的相同结果不会再次访问百度。
+`--include-lzl` 可能产生很多请求，也更容易遇到百度安全验证，所以默认关闭。`--delay` 控制连续请求的最小间隔，默认 1 秒。首次导出遇到验证、网络错误或手动中断后，重新执行同一命令会复用已经成功写入的逐页缓存。
+
+### 更新检查与归档状态
+
+对已经完整导出的帖子再次执行相同命令时，程序会默认检查更新：
+
+- 重新扫描全部正文页，更新总楼层数、新增或删除的楼层，以及同一 `pid` 下已修改的正文；
+- 比较每个主楼层的 `nested_reply_count`。数量发生变化时，只重新抓取该父楼层的完整楼中楼，并按楼中楼 `pid` 去重；
+- 楼中楼数量未变化时复用原有完整楼中楼，避免无条件产生大量请求。
+
+楼中楼接口没有全帖级版本号，因此“删掉一条又新增一条”或直接编辑内容、但总数恰好不变时，无法只靠计数可靠发现。需要确认这类变化时使用：
+
+```bash
+python -m tieba_cli export 10955297834 \
+  --full-refresh-lzl \
+  --delay 1.5
+```
+
+`--full-refresh-lzl` 会自动启用完整楼中楼导出，并忽略计数是否变化，重新请求所有父楼层的楼中楼。
+
+`manifest.json` 的 `update` 与 `thread.json` 的 `export.update` 会同步记录三种状态：
+
+- `active`：最近一次检查成功，归档内容是当前成功取得的快照；
+- `check_failed`：检查因 Cookie 过期、网络、安全验证、接口变更等原因失败，原有 JSON 继续保留，不能据此判断帖子已删除；
+- `archived`：连续两次检查中，新版和旧移动端都明确返回帖子不存在，之后默认不再访问百度。
+
+状态中还会保留 `last_checked_at`、`last_success_at`、`last_error`、`consecutive_not_found`、`archived_at` 和 `archive_reason`。普通请求失败、拿不到楼层数量或单一接口的 404 不会永久归档，避免把短暂风控、Cookie 失效或接口故障误判为删帖。实测中，新版对某些不存在的 ID 也可能只返回含义宽泛的“加载数据失败”，旧版可能返回无楼层的通用页面；这类模糊结果同样只会进入 `check_failed`。
+
+若需要重新检查已归档帖子，可使用：
+
+```bash
+python -m tieba_cli export 10955297834 --force-refresh
+```
+
+强制刷新成功后，状态会恢复为 `active`；失败时仍保留已有正文和图片 URL。
 
 w3m/CGI 阅读仍使用旧移动端页面和 w3m Cookie jar；结构化导出则优先使用 `.env` 中的登录 Cookie 请求当前 JSON 接口。两条路径都不会尝试绕过 CAPTCHA 或安全验证。
 

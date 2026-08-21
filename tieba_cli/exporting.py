@@ -13,7 +13,12 @@ from typing import Callable
 
 from .constants import CURRENT_THREAD_URL, MOBILE_THREAD_URL
 from .current_api import CurrentNestedReplyPage, CurrentTiebaClient
-from .errors import FetchError
+from .errors import FetchError, ThreadNotFoundError
+from .lifecycle import (
+    mark_update_failure,
+    mark_update_success,
+    normalize_update_state,
+)
 from .models import NestedReply, Post, ThreadPage
 from .parsing import parse_lzl_page, parse_thread_page
 from .routing import extract_thread_id
@@ -130,6 +135,74 @@ def _default_output_dir(thread_id: str) -> Path:
     return base / "tieba-cli" / "threads" / thread_id
 
 
+def _resolve_output_dir(
+    thread_id: str, output_dir: Path | str | None
+) -> Path:
+    return (
+        Path(output_dir)
+        if output_dir is not None
+        else _default_output_dir(thread_id)
+    )
+
+
+def _load_update_state(export_dir: Path) -> dict[str, object]:
+    manifest_path = export_dir / "manifest.json"
+    if manifest_path.exists():
+        return normalize_update_state(_read_json(manifest_path).get("update"))
+    result_path = export_dir / "thread.json"
+    if result_path.exists():
+        result = _read_json(result_path)
+        export = result.get("export")
+        if isinstance(export, dict):
+            return normalize_update_state(export.get("update"))
+    return normalize_update_state(None)
+
+
+def _sync_update_state(
+    export_dir: Path, update: dict[str, object]
+) -> None:
+    manifest_path = export_dir / "manifest.json"
+    result_path = export_dir / "thread.json"
+    if manifest_path.exists():
+        manifest = _read_json(manifest_path)
+        if result_path.exists():
+            manifest["status"] = "complete"
+        manifest["update"] = update
+        manifest["updated_at"] = str(update.get("last_checked_at") or _timestamp())
+        _atomic_write_json(manifest_path, manifest)
+    if result_path.exists():
+        result = _read_json(result_path)
+        export = result.setdefault("export", {})
+        if not isinstance(export, dict):
+            raise FetchError("thread.json 的导出元数据无效")
+        export["update"] = update
+        _atomic_write_json(result_path, result)
+
+
+def _prepare_refreshed_posts(
+    posts: list[Post],
+    previous_posts: list[Post],
+    *,
+    full_refresh_lzl: bool,
+) -> set[str]:
+    previous_by_pid = {post.pid: post for post in previous_posts if post.pid}
+    refresh_pids: set[str] = set()
+    for post in posts:
+        previous = previous_by_pid.get(post.pid)
+        if previous is None:
+            if post.nested_reply_count:
+                refresh_pids.add(post.pid)
+            continue
+        count_changed = (
+            previous.nested_reply_count != post.nested_reply_count
+        )
+        if full_refresh_lzl or count_changed:
+            refresh_pids.add(post.pid)
+            continue
+        _merge_nested_replies(post, previous.nested_replies)
+    return refresh_pids
+
+
 def _load_cached_pages(pages_dir: Path) -> dict[int, ThreadPage]:
     pages: dict[int, ThreadPage] = {}
     if not pages_dir.exists():
@@ -198,6 +271,7 @@ def _export_nested_replies(
     export_dir: Path,
     fetch: _PacedFetcher,
     manifest: dict[str, object],
+    refresh_pids: set[str] | None = None,
 ) -> None:
     lzl_dir = export_dir / "lzl"
     completed = manifest.setdefault("completed_lzl_pids", [])
@@ -210,7 +284,8 @@ def _export_nested_replies(
 
         post_dir = lzl_dir / post.pid
         cached_pages: dict[int, dict[str, object]] = {}
-        if post_dir.exists():
+        refresh_post = post.pid in (refresh_pids or set())
+        if post_dir.exists() and not refresh_post:
             for path in post_dir.glob("*.json"):
                 if path.stem.isdigit():
                     cached_pages[int(path.stem)] = _read_json(path)
@@ -276,13 +351,16 @@ def _export_legacy_thread(
     include_lzl: bool = False,
     delay: float = 1.0,
     fetcher: Fetcher | None = None,
+    refresh_existing: bool = False,
+    full_refresh_lzl: bool = False,
+    previous_update: object = None,
 ) -> Path:
     """Export every main-thread page and optionally every nested reply."""
 
     if delay < 0:
         raise ValueError("请求间隔不能为负数")
     thread_id = extract_thread_id(value)
-    export_dir = Path(output_dir) if output_dir is not None else _default_output_dir(thread_id)
+    export_dir = _resolve_output_dir(thread_id, output_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = export_dir / "manifest.json"
     result_path = export_dir / "thread.json"
@@ -293,7 +371,8 @@ def _export_legacy_thread(
             raise ValueError("输出目录属于另一个贴吧帖子")
         if manifest.get("status") == "complete" and result_path.exists():
             completed_with_lzl = bool(manifest.get("include_lzl"))
-            if completed_with_lzl or not include_lzl:
+            include_lzl = include_lzl or completed_with_lzl
+            if (completed_with_lzl or not include_lzl) and not refresh_existing:
                 return result_path
     else:
         manifest = {
@@ -316,7 +395,9 @@ def _export_legacy_thread(
         fetcher = fetch_tieba_html
     fetch = _PacedFetcher(fetcher, delay)
     pages_dir = export_dir / "pages"
-    pages = _load_cached_pages(pages_dir)
+    cached_pages = _load_cached_pages(pages_dir)
+    previous_posts = _ordered_posts(cached_pages)
+    pages = {} if refresh_existing else cached_pages
 
     try:
         first_page = pages.get(0)
@@ -365,14 +446,28 @@ def _export_legacy_thread(
         )
         _atomic_write_json(manifest_path, manifest)
 
+        refresh_pids = _prepare_refreshed_posts(
+            posts,
+            previous_posts,
+            full_refresh_lzl=full_refresh_lzl,
+        ) if refresh_existing else set()
+
         if include_lzl:
-            _export_nested_replies(thread_id, posts, export_dir, fetch, manifest)
+            _export_nested_replies(
+                thread_id,
+                posts,
+                export_dir,
+                fetch,
+                manifest,
+                refresh_pids,
+            )
 
         _atomic_write_jsonl(
             export_dir / "posts.jsonl",
             [post.to_dict() for post in posts],
         )
         completed_at = _timestamp()
+        update = mark_update_success(previous_update, completed_at)
         result = {
             "schema_version": 2,
             "thread": {
@@ -389,6 +484,7 @@ def _export_legacy_thread(
                 "include_lzl": include_lzl,
                 "source": "legacy",
                 "source_endpoint": MOBILE_THREAD_URL,
+                "update": update,
             },
             "posts": [post.to_dict() for post in posts],
         }
@@ -397,6 +493,9 @@ def _export_legacy_thread(
             {
                 "status": "complete",
                 "include_lzl": include_lzl,
+                "source": "legacy",
+                "source_endpoint": MOBILE_THREAD_URL,
+                "update": update,
                 "updated_at": completed_at,
             }
         )
@@ -449,9 +548,12 @@ def _export_current_thread(
     output_dir: Path | str | None,
     include_lzl: bool,
     delay: float,
+    refresh_existing: bool = False,
+    full_refresh_lzl: bool = False,
+    previous_update: object = None,
 ) -> Path:
     thread_id = extract_thread_id(value)
-    export_dir = Path(output_dir) if output_dir is not None else _default_output_dir(thread_id)
+    export_dir = _resolve_output_dir(thread_id, output_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = export_dir / "current"
     pages_dir = cache_dir / "pages"
@@ -464,7 +566,8 @@ def _export_current_thread(
             raise ValueError("输出目录属于另一个贴吧帖子")
         if manifest.get("status") == "complete" and result_path.exists():
             completed_with_lzl = bool(manifest.get("include_lzl"))
-            if completed_with_lzl or not include_lzl:
+            include_lzl = include_lzl or completed_with_lzl
+            if (completed_with_lzl or not include_lzl) and not refresh_existing:
                 return result_path
     else:
         manifest = {
@@ -481,11 +584,13 @@ def _export_current_thread(
         }
         _atomic_write_json(manifest_path, manifest)
 
-    pages: dict[int, ThreadPage] = {}
+    cached_pages: dict[int, ThreadPage] = {}
     if pages_dir.exists():
         for path in pages_dir.glob("*.json"):
             if path.stem.isdigit():
-                pages[int(path.stem)] = _page_from_dict(_read_json(path))
+                cached_pages[int(path.stem)] = _page_from_dict(_read_json(path))
+    previous_posts = _ordered_posts(cached_pages)
+    pages = {} if refresh_existing else cached_pages
 
     last_request: float | None = None
 
@@ -544,6 +649,12 @@ def _export_current_thread(
         )
         _atomic_write_json(manifest_path, manifest)
 
+        refresh_pids = _prepare_refreshed_posts(
+            posts,
+            previous_posts,
+            full_refresh_lzl=full_refresh_lzl,
+        ) if refresh_existing else set()
+
         if include_lzl:
             completed = manifest.setdefault("completed_lzl_pids", [])
             if not isinstance(completed, list):
@@ -555,7 +666,7 @@ def _export_current_thread(
                 post_dir = cache_dir / "lzl" / post.pid
                 while len(post.nested_replies) < post.nested_reply_count:
                     cache_path = post_dir / f"{offset}.json"
-                    if cache_path.exists():
+                    if cache_path.exists() and post.pid not in refresh_pids:
                         nested_page = _current_nested_page_from_dict(
                             _read_json(cache_path)
                         )
@@ -579,6 +690,7 @@ def _export_current_thread(
             export_dir / "posts.jsonl", [post.to_dict() for post in posts]
         )
         completed_at = _timestamp()
+        update = mark_update_success(previous_update, completed_at)
         result = {
             "schema_version": 2,
             "thread": {
@@ -594,6 +706,7 @@ def _export_current_thread(
                 "include_lzl": include_lzl,
                 "source": "current",
                 "source_endpoint": CURRENT_THREAD_URL,
+                "update": update,
             },
             "posts": [post.to_dict() for post in posts],
         }
@@ -602,6 +715,7 @@ def _export_current_thread(
             {
                 "status": "complete",
                 "include_lzl": include_lzl,
+                "update": update,
                 "updated_at": completed_at,
             }
         )
@@ -624,6 +738,8 @@ def export_thread(
     fetcher: Fetcher | None = None,
     source: str = "auto",
     current_client: CurrentTiebaClient | None = None,
+    force_refresh: bool = False,
+    full_refresh_lzl: bool = False,
 ) -> Path:
     """Export a thread, preferring the current authenticated JSON API."""
 
@@ -632,9 +748,26 @@ def export_thread(
     if source not in {"auto", "current", "legacy"}:
         raise ValueError("source 必须是 auto、current 或 legacy")
 
+    thread_id = extract_thread_id(value)
+    export_dir = _resolve_output_dir(thread_id, output_dir)
+    result_path = export_dir / "thread.json"
+    previous_update = _load_update_state(export_dir)
+    if (
+        previous_update.get("state") == "archived"
+        and result_path.exists()
+        and not force_refresh
+        and not full_refresh_lzl
+    ):
+        return result_path
+
+    refresh_existing = result_path.exists()
+    if full_refresh_lzl:
+        include_lzl = True
+
     should_try_current = source in {"auto", "current"}
     if source == "auto" and fetcher is not None and current_client is None:
         should_try_current = False
+    current_error: FetchError | None = None
     if should_try_current:
         try:
             client = current_client or CurrentTiebaClient.from_env()
@@ -644,18 +777,53 @@ def export_thread(
                 output_dir=output_dir,
                 include_lzl=include_lzl,
                 delay=delay,
+                refresh_existing=refresh_existing,
+                full_refresh_lzl=full_refresh_lzl,
+                previous_update=previous_update,
             )
-        except FetchError:
+        except FetchError as exc:
+            current_error = exc
             if source == "current":
-                raise
+                if not result_path.exists():
+                    raise
+                update = mark_update_failure(
+                    previous_update,
+                    checked_at=_timestamp(),
+                    message=str(exc),
+                    confirmed_not_found=False,
+                )
+                _sync_update_state(export_dir, update)
+                return result_path
 
-    return _export_legacy_thread(
-        value,
-        output_dir=output_dir,
-        include_lzl=include_lzl,
-        delay=delay,
-        fetcher=fetcher,
-    )
+    try:
+        return _export_legacy_thread(
+            value,
+            output_dir=output_dir,
+            include_lzl=include_lzl,
+            delay=delay,
+            fetcher=fetcher,
+            refresh_existing=refresh_existing,
+            full_refresh_lzl=full_refresh_lzl,
+            previous_update=previous_update,
+        )
+    except FetchError as legacy_error:
+        if not result_path.exists():
+            raise
+        confirmed_not_found = (
+            source == "auto"
+            and isinstance(current_error, ThreadNotFoundError)
+            and isinstance(legacy_error, ThreadNotFoundError)
+        )
+        errors = [error for error in (current_error, legacy_error) if error]
+        message = "；".join(str(error) for error in errors)
+        update = mark_update_failure(
+            previous_update,
+            checked_at=_timestamp(),
+            message=message,
+            confirmed_not_found=confirmed_not_found,
+        )
+        _sync_update_state(export_dir, update)
+        return result_path
 
 
 def export_cli_main(argv: list[str] | None = None) -> int:
@@ -682,6 +850,16 @@ def export_cli_main(argv: list[str] | None = None) -> int:
         default="auto",
         help="数据源：auto 优先新接口并自动回退（默认）",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="即使已归档也重新检查；成功后恢复为 active",
+    )
+    parser.add_argument(
+        "--full-refresh-lzl",
+        action="store_true",
+        help="忽略楼中楼数量是否变化，重新抓取全部楼中楼",
+    )
     args = parser.parse_args(argv)
     try:
         result = export_thread(
@@ -690,6 +868,8 @@ def export_cli_main(argv: list[str] | None = None) -> int:
             include_lzl=args.include_lzl,
             delay=args.delay,
             source=args.source,
+            force_refresh=args.force_refresh,
+            full_refresh_lzl=args.full_refresh_lzl,
         )
     except (ValueError, OSError, FetchError) as exc:
         parser.exit(1, f"tieba-export: {exc}\n")

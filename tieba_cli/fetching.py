@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-from .errors import FetchError
+from .errors import FetchError, ThreadNotFoundError
 from .routing import build_upstream_url
 
 
@@ -51,5 +51,14 @@ def fetch_tieba_html(request_value: str, *, timeout: float = 25.0) -> tuple[str,
 
     if "<title>百度安全验证</title>" in result.stdout:
         raise FetchError("百度返回了安全验证页面，请稍后重试")
+
+    not_found_markers = (
+        "您访问的贴子不存在",
+        "您要浏览的贴子不存在",
+        "本贴已被删除",
+        "该贴已被删除",
+    )
+    if any(marker in result.stdout for marker in not_found_markers):
+        raise ThreadNotFoundError("贴吧旧移动端明确表示帖子不存在")
 
     return result.stdout, upstream_url
