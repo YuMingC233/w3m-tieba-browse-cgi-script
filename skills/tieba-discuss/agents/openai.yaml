@@ -1,0 +1,4 @@
+interface:
+  display_name: "贴吧帖子讨论"
+  short_description: "导出百度贴吧完整正文与楼中楼，并基于楼层证据继续讨论"
+  default_prompt: "Use $tieba-discuss to export this Tieba thread and discuss its claims with floor-level evidence."

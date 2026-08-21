@@ -190,6 +190,25 @@ python -m tieba_cli export 10955297834 \
 
 导出器和 CGI 使用相同的子 w3m 抓取方式，复用 w3m Cookie，但不会读取或写出 Cookie。所有百度请求都固定在旧移动端 `mo/q---1-3-0--2/m` 和 `mo/q---1-3-0--2/flr`，不会自动切换到新版接口，也不会尝试绕过安全验证。
 
+## 让 Codex 直接讨论帖子
+
+仓库包含 [`tieba-discuss`](skills/tieba-discuss/SKILL.md) Skill。它会调用上述导出命令，并要求 Agent 按楼层和 `pid` 区分贴吧原文与自己的推断。Skill 本身不重复实现抓取逻辑，也不会直接读取 Cookie。
+
+在项目根目录把 Skill 链接到 Codex 的个人 Skill 目录：
+
+```bash
+mkdir -p ~/.codex/skills
+ln -s "$PWD/skills/tieba-discuss" ~/.codex/skills/tieba-discuss
+```
+
+如果目标已经存在，`ln` 会拒绝覆盖；请先确认它是旧副本还是正确链接，不要直接删除。重启 Codex 或开启新会话使其发现 Skill，之后可以这样使用：
+
+```text
+使用 $tieba-discuss 读取帖子 10955297834，梳理争议双方的主要依据。
+```
+
+要求“完整讨论”或问题依赖楼中楼时，Skill 会使用 `--include-lzl`；否则默认只导出全部主楼层和页面已经嵌入的楼中楼，以减少请求和触发安全验证的概率。若导出中断，Agent 应报告 `manifest.json` 的未完成状态，而不是把局部内容当成全帖。
+
 ## 测试
 
 ```bash
