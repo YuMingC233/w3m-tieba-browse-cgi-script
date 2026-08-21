@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 
 from tieba_filter import (
@@ -14,6 +15,7 @@ from tieba_filter import (
 )
 from tieba_cli.parsing import parse_lzl_page, parse_thread_page
 from tieba_cli.exporting import export_thread
+from tieba_cli.current_api import CurrentTiebaClient
 
 
 class TiebaFilterTests(unittest.TestCase):
@@ -169,7 +171,7 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertEqual(parsed_lzl.total_replies, 107)
         self.assertEqual(parsed_lzl.total_pages, 11)
         self.assertEqual(parsed_lzl.replies[0].author, "楼中楼用户")
-        self.assertEqual(parsed_lzl.replies[0].content, "完整楼中楼内容")
+        self.assertEqual(parsed_lzl.replies[0].content_text, "完整楼中楼内容")
 
         export_pages = {
             "10955297834": """
@@ -234,10 +236,10 @@ class TiebaFilterTests(unittest.TestCase):
             self.assertEqual(exported["thread"]["title"], "导出测试帖")
             self.assertEqual(exported["export"]["status"], "complete")
             self.assertEqual(len(exported["posts"]), 2)
-            self.assertEqual(exported["posts"][0]["content"], "第一页正文")
+            self.assertEqual(exported["posts"][0]["content_text"], "第一页正文")
             self.assertEqual(len(exported["posts"][0]["nested_replies"]), 2)
             self.assertEqual(
-                exported["posts"][0]["nested_replies"][1]["content"],
+                exported["posts"][0]["nested_replies"][1]["content_text"],
                 "第二条讨论",
             )
             self.assertEqual(
@@ -381,15 +383,214 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertEqual(post.floor, 11)
         self.assertEqual(post.author, "贴吧用户_QJNt3D2")
         self.assertEqual(post.posted_at, "2025-12-10")
-        self.assertIn("正文应该保留", post.content)
-        self.assertNotIn("下载贴吧APP", post.content)
+        self.assertIn("正文应该保留", post.content_text)
+        self.assertNotIn("下载贴吧APP", post.content_text)
         self.assertEqual(post.nested_reply_count, 107)
         self.assertEqual(post.nested_replies[0].pid, "153847300001")
         self.assertEqual(post.nested_replies[0].author, "楼中楼用户")
         self.assertEqual(
-            post.nested_replies[0].content,
+            post.nested_replies[0].content_text,
             "已展示的楼中楼应该保留",
         )
+
+    def test_current_api_export_preserves_rich_content_and_nested_replies(self):
+        image = {
+            "type": 3,
+            "media": [
+                {
+                    "origin_src": "https://imgsrc.baidu.com/forum/pic/item/full.jpg",
+                    "bsize": "1280,720",
+                }
+            ],
+        }
+        nested_image = {
+            "type": 3,
+            "media": [
+                {
+                    "origin_src": "https://imgsrc.baidu.com/forum/pic/item/nested.png",
+                    "bsize": "640,480",
+                }
+            ],
+        }
+        requests = []
+
+        def fake_request(method, path, headers, body):
+            requests.append((method, path, headers, body))
+            if path == "/dc/common/tbs":
+                return {"is_login": 1, "tbs": "fresh-tbs"}
+
+            params = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
+            self.assertEqual(params["subapp_type"], ["pc"])
+            self.assertEqual(params["_client_type"], ["20"])
+            self.assertEqual(len(params["sign"][0]), 32)
+            if path == "/c/f/pb/nestedFloor":
+                self.assertEqual(params["offset"], ["1"])
+                return {
+                    "error_code": 0,
+                    "page": {"offset": 2, "has_more": 0},
+                    "post_list": [
+                        {
+                            "id": 300002,
+                            "author_id": 3,
+                            "time": 1770000002,
+                            "content": [
+                                {"type": 0, "text": "补全的楼中楼"},
+                                nested_image,
+                            ],
+                        }
+                    ],
+                    "user_list": [{"id": 3, "name_show": "丙"}],
+                }
+
+            page = int(params["pn"][0])
+            if page == 1:
+                self.assertEqual(params["r"], ["2"])
+                return {
+                    "error_code": 0,
+                    "page": {"current_page": 1, "total_page": 2, "has_more": 1},
+                    "thread": {
+                        "id": 10955297834,
+                        "title": "新版导出测试帖",
+                        "valid_post_num": 3,
+                    },
+                    "forum": {"name": "测试"},
+                    "user_list": [
+                        {"id": 1, "name_show": "楼主"},
+                        {"id": 2, "name_show": "乙"},
+                    ],
+                    "first_floor": {
+                        "id": 100001,
+                        "floor": 1,
+                        "author_id": 1,
+                        "time": 1770000000,
+                        "content": [
+                            {"type": 0, "text": "包含图片的正文"},
+                            image,
+                        ],
+                        "sub_post_number": 0,
+                    },
+                    "post_list": [
+                        {
+                            "id": 100002,
+                            "floor": 2,
+                            "author_id": 2,
+                            "time": 1770000001,
+                            "content": [{"type": 0, "text": "第二楼"}],
+                            "sub_post_number": 2,
+                            "sub_post_list": {
+                                "sub_post_list": [
+                                    {
+                                        "id": 300001,
+                                        "author_id": 2,
+                                        "time": 1770000001,
+                                        "content": [{"type": 0, "text": "已内嵌"}],
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                }
+
+            self.assertEqual(params["r"], ["0"])
+            return {
+                "error_code": 0,
+                "page": {"current_page": 2, "total_page": 2, "has_more": 0},
+                "thread": {
+                    "id": 10955297834,
+                    "title": "新版导出测试帖",
+                    "valid_post_num": 3,
+                },
+                "forum": {"name": "测试"},
+                "user_list": [{"id": 4, "name_show": "丁"}],
+                "post_list": [
+                    {
+                        "id": 100003,
+                        "floor": 3,
+                        "author_id": 4,
+                        "time": 1770000003,
+                        "content": [{"type": 0, "text": "第三楼"}],
+                        "sub_post_number": 0,
+                    }
+                ],
+            }
+
+        client = CurrentTiebaClient(
+            "BAIDUID=test; BDUSS=logged-in; STOKEN=token",
+            request_json=fake_request,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = export_thread(
+                "10955297834",
+                output_dir=Path(temp_dir),
+                include_lzl=True,
+                delay=0,
+                source="current",
+                current_client=client,
+            )
+            exported = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exported["schema_version"], 2)
+        self.assertEqual(exported["export"]["source"], "current")
+        self.assertEqual(len(exported["posts"]), 3)
+        self.assertEqual(exported["posts"][0]["content_text"], "包含图片的正文\n[图片]")
+        self.assertEqual(exported["posts"][0]["content"], [
+            {"type": 0, "text": "包含图片的正文"},
+            image,
+        ])
+        self.assertEqual(
+            exported["posts"][1]["nested_replies"][1]["content"][1]
+            ["media"][0]["origin_src"],
+            "https://imgsrc.baidu.com/forum/pic/item/nested.png",
+        )
+        self.assertTrue(any(path == "/c/f/pb/nestedFloor" for _, path, _, _ in requests))
+
+    def test_export_auto_falls_back_to_legacy_and_preserves_image_url(self):
+        class FailedCurrentClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                raise FetchError("模拟新接口不可用")
+
+        legacy_source = """
+            <html><head><title>旧接口回退帖</title></head><body>
+            <a class="post_title_text">测试吧</a>
+            <li tid="900001" fn="1" class="post_list_item"
+                data-info='{"name_show":"楼主"}'>
+              <span class="list_item_time">2026-08-21</span>
+              <div class="content">
+                旧接口正文
+                <img src="https://imgsrc.baidu.com/forum/pic/item/legacy.jpg"
+                     data-original="https://imgsrc.baidu.com/forum/pic/item/legacy-full.jpg">
+              </div>
+            </li>
+            <script>conf: {page: {"page_size":30,"offset":0,
+            "current_page":1,"total_page":1,"total_num":1}}</script>
+            </body></html>
+        """
+        fetch_calls = []
+
+        def fake_legacy_fetch(request_value):
+            fetch_calls.append(request_value)
+            return legacy_source, _build_upstream_url(request_value)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = export_thread(
+                "10955297834",
+                output_dir=Path(temp_dir),
+                delay=0,
+                source="auto",
+                current_client=FailedCurrentClient(),
+                fetcher=fake_legacy_fetch,
+            )
+            exported = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(fetch_calls, ["10955297834"])
+        self.assertEqual(exported["schema_version"], 2)
+        self.assertEqual(exported["export"]["source"], "legacy")
+        self.assertEqual(exported["posts"][0]["content_text"], "旧接口正文")
+        self.assertEqual(
+            exported["posts"][0]["content"][1]["attributes"]["data-original"],
+            "https://imgsrc.baidu.com/forum/pic/item/legacy-full.jpg",
+        )
+        self.assertIn("legacy.jpg", exported["posts"][0]["content_html"])
 
 
 if __name__ == "__main__":

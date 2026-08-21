@@ -5,6 +5,10 @@ TIEBA_HOSTS = {"tieba.baidu.com", "www.tieba.baidu.com"}
 # These are legacy page endpoints, not a versioned or stability-guaranteed API.
 MOBILE_THREAD_URL = "https://tieba.baidu.com/mo/q---1-3-0--2/m"
 LZL_URL = "https://tieba.baidu.com/mo/q---1-3-0--2/flr"
+CURRENT_TBS_URL = "https://tieba.baidu.com/dc/common/tbs"
+CURRENT_THREAD_URL = "https://tieba.baidu.com/c/f/pb/page_pc"
+CURRENT_LZL_URL = "https://tieba.baidu.com/c/f/pb/nestedFloor"
+CURRENT_PC_SIGN_SALT = "36770b1f34c9bbf2e7d1a99d2b82fa9e"
 CGI_URL = "file:/cgi-bin/tieba_filter.py?"
 
 SAFE_UPSTREAM_PARAMS = ("pn", "see_lz", "r")

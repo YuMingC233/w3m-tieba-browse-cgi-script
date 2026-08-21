@@ -30,6 +30,32 @@ def _clean_text(parts: list[str]) -> str:
     return text.strip()
 
 
+def _normalized_content(nodes: list[dict[str, object]]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for node in nodes:
+        if node.get("type") != "text":
+            normalized.append(node)
+            continue
+        text = _clean_text([str(node.get("text", ""))])
+        if not text:
+            continue
+        if normalized and normalized[-1].get("type") == "text":
+            normalized[-1]["text"] = (
+                str(normalized[-1].get("text", "")) + "\n" + text
+            )
+        else:
+            normalized.append({"type": "text", "text": text})
+    return normalized
+
+
+def _start_tag_html(tag: str, attrs: list[tuple[str, str | None]]) -> str:
+    rendered = "".join(
+        f' {html.escape(name, quote=True)}="{html.escape(value or "", quote=True)}"'
+        for name, value in attrs
+    )
+    return f"<{tag}{rendered}>"
+
+
 def _page_data(source: str) -> dict[str, object]:
     match = re.search(r"\bpage\s*:\s*(\{[^{}]+\})", source)
     if not match:
@@ -49,6 +75,9 @@ def _integer(data: dict[str, object], name: str, default: int) -> int:
 class _TextCaptureMixin:
     capture_parts: list[str] | None
     capture_depth: int
+    rich_nodes: list[dict[str, object]] | None
+    rich_html_parts: list[str] | None
+    rich_depth: int
 
     def _capture(self, parts: list[str]) -> None:
         if self.capture_parts is None:
@@ -70,7 +99,58 @@ class _TextCaptureMixin:
         if self.capture_depth == 0:
             self.capture_parts = None
 
+    def _capture_rich(
+        self,
+        nodes: list[dict[str, object]],
+        html_parts: list[str],
+    ) -> None:
+        self.rich_nodes = nodes
+        self.rich_html_parts = html_parts
+        self.rich_depth = 1
+
+    def _rich_start_tag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if self.rich_nodes is None or self.rich_html_parts is None:
+            return
+        self.rich_html_parts.append(_start_tag_html(tag, attrs))
+        attr_map = _attribute_map(attrs)
+        if tag == "img":
+            self.rich_nodes.append(
+                {"type": "image", "tag": "img", "attributes": attr_map}
+            )
+        elif tag == "a":
+            self.rich_nodes.append(
+                {"type": "link", "tag": "a", "attributes": attr_map}
+            )
+        elif tag in {"video", "source"}:
+            self.rich_nodes.append(
+                {"type": "media", "tag": tag, "attributes": attr_map}
+            )
+        elif tag == "br":
+            self.rich_nodes.append({"type": "text", "text": "\n"})
+        if tag not in VOID_ELEMENTS:
+            self.rich_depth += 1
+
+    def _rich_end_tag(self, tag: str) -> None:
+        if self.rich_nodes is None or self.rich_html_parts is None:
+            return
+        if tag not in VOID_ELEMENTS:
+            if self.rich_depth > 1:
+                self.rich_html_parts.append(f"</{tag}>")
+            self.rich_depth -= 1
+        if self.rich_depth == 0:
+            self.rich_nodes = None
+            self.rich_html_parts = None
+
+    def _rich_data(self, data: str) -> None:
+        if self.rich_nodes is None or self.rich_html_parts is None:
+            return
+        self.rich_html_parts.append(html.escape(data))
+        self.rich_nodes.append({"type": "text", "text": data})
+
     def handle_data(self, data: str) -> None:
+        self._rich_data(data)
         if self.capture_parts is not None:
             self.capture_parts.append(data)
 
@@ -88,6 +168,9 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
         self.capture_parts = None
         self.capture_depth = 0
         self.capture_skip_depth = 0
+        self.rich_nodes = None
+        self.rich_html_parts = None
+        self.rich_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -101,6 +184,7 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
             if tag not in VOID_ELEMENTS:
                 self.capture_skip_depth = 1
             return
+        self._rich_start_tag(tag, attrs)
         self._capture_start_tag(tag)
 
         if tag == "li" and self.current_post is None and "post_list_item" in classes:
@@ -119,6 +203,8 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
                 "author_parts": [],
                 "time_parts": [],
                 "content_parts": [],
+                "content_nodes": [],
+                "content_html_parts": [],
                 "nested_reply_count": 0,
                 "nested_replies": [],
             }
@@ -130,6 +216,8 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
                     "pid": attr_map.get("pid", ""),
                     "author_parts": [],
                     "content_parts": [],
+                    "content_nodes": [],
+                    "content_html_parts": [],
                 }
                 self.nested_li_depth = 1
             elif self.current_nested is not None:
@@ -144,11 +232,19 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
                 self._capture(self.current_nested["author_parts"])
             elif "floor_content" in classes:
                 self._capture(self.current_nested["content_parts"])
+                self._capture_rich(
+                    self.current_nested["content_nodes"],
+                    self.current_nested["content_html_parts"],
+                )
         elif self.current_post is not None:
             if "list_item_time" in classes:
                 self._capture(self.current_post["time_parts"])
             elif tag == "div" and "content" in classes:
                 self._capture(self.current_post["content_parts"])
+                self._capture_rich(
+                    self.current_post["content_nodes"],
+                    self.current_post["content_html_parts"],
+                )
             elif (
                 not self.current_post["author"]
                 and "user_name" in classes
@@ -171,6 +267,7 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
         if self.capture_skip_depth:
             self.capture_skip_depth -= 1
             return
+        self._rich_end_tag(tag)
         self._capture_end_tag()
         if tag != "li" or self.current_post is None:
             return
@@ -181,7 +278,9 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
                 reply = NestedReply(
                     pid=str(self.current_nested["pid"]),
                     author=_clean_text(self.current_nested["author_parts"]).rstrip(":："),
-                    content=_clean_text(self.current_nested["content_parts"]),
+                    content_text=_clean_text(self.current_nested["content_parts"]),
+                    content=_normalized_content(self.current_nested["content_nodes"]),
+                    content_html="".join(self.current_nested["content_html_parts"]).strip(),
                 )
                 self.current_post["nested_replies"].append(reply)
                 self.current_nested = None
@@ -197,7 +296,9 @@ class _ThreadPageParser(_TextCaptureMixin, HTMLParser):
                     floor=self.current_post["floor"],
                     author=author,
                     posted_at=_clean_text(self.current_post["time_parts"]),
-                    content=_clean_text(self.current_post["content_parts"]),
+                    content_text=_clean_text(self.current_post["content_parts"]),
+                    content=_normalized_content(self.current_post["content_nodes"]),
+                    content_html="".join(self.current_post["content_html_parts"]).strip(),
                     nested_reply_count=int(self.current_post["nested_reply_count"]),
                     nested_replies=list(self.current_post["nested_replies"]),
                 )
@@ -217,9 +318,13 @@ class _NestedReplyParser(_TextCaptureMixin, HTMLParser):
         self.li_depth = 0
         self.capture_parts = None
         self.capture_depth = 0
+        self.rich_nodes = None
+        self.rich_html_parts = None
+        self.rich_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        self._rich_start_tag(tag, attrs)
         self._capture_start_tag(tag)
         attr_map = _attribute_map(attrs)
         classes = set(attr_map.get("class", "").split())
@@ -228,6 +333,8 @@ class _NestedReplyParser(_TextCaptureMixin, HTMLParser):
                 "pid": attr_map.get("pid", ""),
                 "author_parts": [],
                 "content_parts": [],
+                "content_nodes": [],
+                "content_html_parts": [],
             }
             self.li_depth = 1
         elif tag == "li" and self.current is not None:
@@ -238,9 +345,14 @@ class _NestedReplyParser(_TextCaptureMixin, HTMLParser):
                 self._capture(self.current["author_parts"])
             elif "floor_content" in classes:
                 self._capture(self.current["content_parts"])
+                self._capture_rich(
+                    self.current["content_nodes"],
+                    self.current["content_html_parts"],
+                )
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        self._rich_end_tag(tag)
         self._capture_end_tag()
         if tag != "li" or self.current is None:
             return
@@ -250,7 +362,9 @@ class _NestedReplyParser(_TextCaptureMixin, HTMLParser):
                 NestedReply(
                     pid=str(self.current["pid"]),
                     author=_clean_text(self.current["author_parts"]).rstrip(":："),
-                    content=_clean_text(self.current["content_parts"]),
+                    content_text=_clean_text(self.current["content_parts"]),
+                    content=_normalized_content(self.current["content_nodes"]),
+                    content_html="".join(self.current["content_html_parts"]).strip(),
                 )
             )
             self.current = None

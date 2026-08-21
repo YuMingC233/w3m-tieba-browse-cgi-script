@@ -1,6 +1,7 @@
 """Reusable components for the legacy Tieba mobile adapter."""
 
 from .app import cgi_main, cli_main, main, render_request
+from .current_api import CurrentTiebaClient
 from .errors import FetchError
 from .exporting import export_thread
 from .fetching import fetch_tieba_html
@@ -9,6 +10,7 @@ from .rendering import add_forum_pagination, add_thread_pagination, render_lzl_p
 from .routing import build_upstream_url, extract_thread_id
 
 __all__ = [
+    "CurrentTiebaClient",
     "FetchError",
     "add_forum_pagination",
     "add_thread_pagination",

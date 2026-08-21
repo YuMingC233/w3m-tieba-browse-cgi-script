@@ -10,7 +10,11 @@ from typing import Any
 class NestedReply:
     pid: str
     author: str
-    content: str
+    content_text: str
+    content: list[dict[str, Any]] = field(default_factory=list)
+    content_html: str = ""
+    author_id: str = ""
+    posted_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -22,7 +26,10 @@ class Post:
     floor: int | None
     author: str
     posted_at: str
-    content: str
+    content_text: str
+    content: list[dict[str, Any]] = field(default_factory=list)
+    content_html: str = ""
+    author_id: str = ""
     nested_reply_count: int = 0
     nested_replies: list[NestedReply] = field(default_factory=list)
 

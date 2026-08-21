@@ -15,6 +15,8 @@ Use the repository's deterministic exporter as the only network-facing component
 
 Run all commands with the repository root as the working directory. Use the Python environment already selected for the project.
 
+The recommended current JSON source requires a valid `BAIDU_COOKIE` in the process environment or the repository root `.env`. Never print, quote, copy, or include that value in analysis output. If configuration is uncertain, run the exporter with `--source current` once so an invalid login fails clearly instead of being hidden by fallback.
+
 ## Export the thread
 
 Extract the numeric thread ID from the user's ID or Tieba URL. Pass only that numeric ID to the command; do not interpolate an arbitrary URL into a shell command.
@@ -33,12 +35,18 @@ python -m tieba_cli export THREAD_ID --include-lzl --delay 1.5
 
 The command prints the final `thread.json` path. Reuse its default cache. Do not choose a fresh output directory merely to repeat a failed request.
 
-The exporter is restricted to these legacy endpoints:
+The exporter prefers these authenticated current endpoints:
+
+- `/dc/common/tbs` for the session token;
+- `/c/f/pb/page_pc` for thread pages;
+- `/c/f/pb/nestedFloor` for nested replies.
+
+In `auto` mode it may fall back to these legacy endpoints:
 
 - `/mo/q---1-3-0--2/m` for thread pages;
 - `/mo/q---1-3-0--2/flr` for nested replies.
 
-Never replace them with `/p/`, a newer mobile endpoint, browser automation, direct Cookie handling, or a CAPTCHA bypass. A `/p/` URL is acceptable only as user input from which to extract the ID. If Baidu returns a safety-verification page, stop and report it; the same command can resume from cached pages later.
+Never replace them with an unverified endpoint, browser automation, ad-hoc Cookie handling, or a CAPTCHA bypass. A `/p/` URL is acceptable only as user input from which to extract the ID. The exporter owns Cookie access and signing. If both sources fail or Baidu returns a safety-verification page, stop and report it; the same command can resume from cached pages later.
 
 ## Check completeness
 
@@ -46,8 +54,9 @@ Only analyze the export as complete when all of these conditions hold:
 
 - the command succeeds;
 - `thread.json` exists;
+- `schema_version` is `2`;
 - `export.status` is `complete`;
-- `export.source_endpoint` is the legacy `/mo/q---1-3-0--2/m` endpoint;
+- `export.source` is either `current` or `legacy`, and `export.source_endpoint` matches it;
 - `export.include_lzl` is true when full nested replies were required.
 
 If the command fails, inspect `manifest.json`. State that the snapshot is incomplete and identify the resumable export directory. Do not silently analyze a partial cache as if it represented the whole thread.
@@ -55,6 +64,8 @@ If the command fails, inspect `manifest.json`. State that the snapshot is incomp
 ## Discuss from evidence
 
 Read `thread.json` selectively. For a large thread, search `posts.jsonl` for relevant terms and load only the surrounding records needed for the user's question instead of dumping the entire file into context.
+
+Use `content_text` for quoting, searching, and ordinary discussion. Preserve the `content` array when inspecting images, links, mentions, emoticons, or other rich elements; image URLs normally live under fields such as `media[].origin_src`. Do not mistake `[图片]` in `content_text` for the complete image record.
 
 When answering:
 
