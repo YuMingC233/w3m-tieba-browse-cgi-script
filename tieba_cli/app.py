@@ -53,13 +53,19 @@ def cgi_main() -> int:
 
 
 def cli_main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:1] == ["export"]:
+        from .exporting import export_cli_main
+
+        return export_cli_main(arguments[1:])
+
     parser = argparse.ArgumentParser(
         description="Download and simplify a Tieba thread or forum page for w3m."
     )
     parser.add_argument(
         "url", help="Tieba /p/ URL, forum-list URL, mobile URL, or numeric thread ID"
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
 
     try:
         sys.stdout.write(render_request(args.url))

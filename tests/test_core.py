@@ -1,7 +1,10 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from tieba_filter import (
+    FetchError,
     _build_upstream_url,
     add_forum_pagination,
     add_thread_pagination,
@@ -10,6 +13,7 @@ from tieba_filter import (
     render_lzl_page,
 )
 from tieba_cli.parsing import parse_lzl_page, parse_thread_page
+from tieba_cli.exporting import export_thread
 
 
 class TiebaFilterTests(unittest.TestCase):
@@ -166,6 +170,127 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertEqual(parsed_lzl.total_pages, 11)
         self.assertEqual(parsed_lzl.replies[0].author, "楼中楼用户")
         self.assertEqual(parsed_lzl.replies[0].content, "完整楼中楼内容")
+
+        export_pages = {
+            "10955297834": """
+                <html><head><title>导出测试帖</title></head><body>
+                <a class="post_title_text">测试吧</a>
+                <li tid="100001" fn="1" class="post_list_item"
+                    data-info='{"name_show":"楼主"}'>
+                  <span class="list_item_time">2026-08-21</span>
+                  <div class="content">第一页正文</div>
+                  <div class="fr_list" data-list-count="2"></div>
+                </li>
+                <script>conf: {page: {"page_size":30,"offset":0,
+                "current_page":1,"total_page":2,"total_num":2}}</script>
+                </body></html>
+            """,
+            "10955297834&pn=30": """
+                <html><head><title>第2/2页,回贴列表-导出测试帖</title></head><body>
+                <a class="post_title_text">测试吧</a>
+                <li tid="100002" fn="31" class="post_list_item"
+                    data-info='{"name_show":"回复者"}'>
+                  <span class="list_item_time">2026-08-22</span>
+                  <div class="content">第二页正文</div>
+                  <div class="fr_list" data-list-count="0"></div>
+                </li>
+                <script>conf: {page: {"page_size":30,"offset":30,
+                "current_page":2,"total_page":2,"total_num":2}}</script>
+                </body></html>
+            """,
+            "lzl=1&tid=10955297834&pid=100001&pn=1": json.dumps(
+                {
+                    "no": 0,
+                    "data": {
+                        "page": {"total_num": 2, "total_page": 1},
+                        "floor_html": (
+                            '<li pid="200001" class="list_item_floor">'
+                            '<a class="user_name">甲:</a>'
+                            '<span class="floor_content">第一条讨论</span></li>'
+                            '<li pid="200002" class="list_item_floor">'
+                            '<a class="user_name">乙:</a>'
+                            '<span class="floor_content">第二条讨论</span></li>'
+                        ),
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+        fetch_calls = []
+
+        def fake_fetch(request_value):
+            fetch_calls.append(request_value)
+            return export_pages[request_value], _build_upstream_url(request_value)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = export_thread(
+                "10955297834",
+                output_dir=Path(temp_dir),
+                include_lzl=True,
+                delay=0,
+                fetcher=fake_fetch,
+            )
+            exported = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(exported["thread"]["title"], "导出测试帖")
+            self.assertEqual(exported["export"]["status"], "complete")
+            self.assertEqual(len(exported["posts"]), 2)
+            self.assertEqual(exported["posts"][0]["content"], "第一页正文")
+            self.assertEqual(len(exported["posts"][0]["nested_replies"]), 2)
+            self.assertEqual(
+                exported["posts"][0]["nested_replies"][1]["content"],
+                "第二条讨论",
+            )
+            self.assertEqual(
+                exported["export"]["source_endpoint"],
+                "https://tieba.baidu.com/mo/q---1-3-0--2/m",
+            )
+            self.assertEqual(len((Path(temp_dir) / "posts.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()), 2)
+            first_fetch_count = len(fetch_calls)
+            cached_path = export_thread(
+                "10955297834",
+                output_dir=Path(temp_dir),
+                include_lzl=True,
+                delay=0,
+                fetcher=fake_fetch,
+            )
+            self.assertEqual(cached_path, result_path)
+            self.assertEqual(len(fetch_calls), first_fetch_count)
+
+            resume_dir = Path(temp_dir) / "resume"
+            failed_once = False
+
+            def flaky_fetch(request_value):
+                nonlocal failed_once
+                fetch_calls.append(request_value)
+                if request_value.endswith("&pn=30") and not failed_once:
+                    failed_once = True
+                    raise FetchError("模拟安全验证")
+                return export_pages[request_value], _build_upstream_url(request_value)
+
+            with self.assertRaises(FetchError):
+                export_thread(
+                    "10955297834",
+                    output_dir=resume_dir,
+                    delay=0,
+                    fetcher=flaky_fetch,
+                )
+            incomplete_manifest = json.loads(
+                (resume_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(incomplete_manifest["status"], "incomplete")
+            fetch_calls.clear()
+            resumed_path = export_thread(
+                "10955297834",
+                output_dir=resume_dir,
+                delay=0,
+                fetcher=flaky_fetch,
+            )
+            self.assertEqual(fetch_calls, ["10955297834&pn=30"])
+            resumed = json.loads(resumed_path.read_text(encoding="utf-8"))
+            self.assertEqual(resumed["export"]["status"], "complete")
+            self.assertEqual(len(resumed["posts"]), 2)
 
     def test_filter_removes_tieba_chrome_and_preserves_reading_content(self):
         source = """

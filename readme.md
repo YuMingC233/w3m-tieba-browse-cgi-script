@@ -149,6 +149,47 @@ w3m 'file:/cgi-bin/tieba_filter.py?lzl=1&tid=10955297834&pid=153847299771&pn=1'
 w3m 'file:/cgi-bin/tieba_filter.py?10955297834&pn=30'
 ```
 
+## 导出完整帖子
+
+需要把帖子交给 Agent 或其他程序继续分析时，可以按帖子 ID 导出全部正文页：
+
+```bash
+python -m tieba_cli export 10955297834
+```
+
+默认结果位于：
+
+```text
+~/.cache/tieba-cli/threads/10955297834/thread.json
+```
+
+也可以指定独立目录：
+
+```bash
+python -m tieba_cli export 10955297834 \
+  --output ./exports/10955297834
+```
+
+输出目录包含：
+
+- `thread.json`：完成后生成的全帖快照，适合提交给 Agent；
+- `posts.jsonl`：每行一个主楼层，适合流式处理和文本检索；
+- `manifest.json`：导出状态、来源接口和已完成进度；
+- `pages/`：正文逐页缓存，用于中断后续传；
+- `lzl/`：启用完整楼中楼后生成的逐页缓存。
+
+正文页中的已展示楼中楼会直接保留。如果讨论必须包含全部楼中楼，可显式启用：
+
+```bash
+python -m tieba_cli export 10955297834 \
+  --include-lzl \
+  --delay 1.5
+```
+
+`--include-lzl` 可能产生很多请求，也更容易遇到百度安全验证，所以默认关闭。`--delay` 控制连续请求的最小间隔，默认 1 秒。导出遇到验证、网络错误或手动中断后，重新执行同一命令会复用已经成功写入的逐页缓存；已经完整导出的相同结果不会再次访问百度。
+
+导出器和 CGI 使用相同的子 w3m 抓取方式，复用 w3m Cookie，但不会读取或写出 Cookie。所有百度请求都固定在旧移动端 `mo/q---1-3-0--2/m` 和 `mo/q---1-3-0--2/flr`，不会自动切换到新版接口，也不会尝试绕过安全验证。
+
 ## 测试
 
 ```bash
