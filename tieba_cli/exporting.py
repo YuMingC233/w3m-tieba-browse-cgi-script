@@ -26,6 +26,17 @@ from .routing import extract_thread_id
 
 
 Fetcher = Callable[[str], tuple[str, str]]
+ProgressCallback = Callable[[str, int, int], None]
+
+
+def _report_progress(
+    progress: ProgressCallback | None,
+    stage: str,
+    current: int,
+    total: int,
+) -> None:
+    if progress is not None:
+        progress(stage, current, total)
 
 
 def _timestamp() -> str:
@@ -292,14 +303,20 @@ def _export_nested_replies(
     fetch: _PacedFetcher,
     manifest: dict[str, object],
     refresh_pids: set[str] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> None:
     lzl_dir = export_dir / "lzl"
     completed = manifest.setdefault("completed_lzl_pids", [])
     if not isinstance(completed, list):
         raise FetchError("导出清单中的楼中楼进度无效")
 
-    for post in posts:
-        if not post.pid or post.nested_reply_count <= len(post.nested_replies):
+    targets = [
+        post for post in posts if post.pid and post.nested_reply_count > 0
+    ]
+    _report_progress(progress, "楼中楼", 0, len(targets))
+    for target_number, post in enumerate(targets, 1):
+        if post.nested_reply_count <= len(post.nested_replies):
+            _report_progress(progress, "楼中楼", target_number, len(targets))
             continue
 
         post_dir = lzl_dir / post.pid
@@ -362,6 +379,7 @@ def _export_nested_replies(
             completed.append(post.pid)
         manifest["updated_at"] = _timestamp()
         _atomic_write_json(export_dir / "manifest.json", manifest)
+        _report_progress(progress, "楼中楼", target_number, len(targets))
 
 
 def _export_legacy_thread(
@@ -375,6 +393,7 @@ def _export_legacy_thread(
     full_refresh_lzl: bool = False,
     previous_update: object = None,
     previous_result_posts: list[Post] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Export every main-thread page and optionally every nested reply."""
 
@@ -434,8 +453,12 @@ def _export_legacy_thread(
         total_pages = first_page.total_pages
         if page_size < 1 or total_pages < 1:
             raise FetchError("贴吧帖子分页信息无效")
+        _report_progress(progress, "正文页", 1, total_pages)
         for offset in range(page_size, page_size * total_pages, page_size):
             if offset in pages:
+                _report_progress(
+                    progress, "正文页", offset // page_size + 1, total_pages
+                )
                 continue
             source, _ = fetch(f"{thread_id}&pn={offset}")
             page = parse_thread_page(source, thread_id)
@@ -448,6 +471,9 @@ def _export_legacy_thread(
             manifest["completed_page_offsets"] = sorted(pages)
             manifest["updated_at"] = _timestamp()
             _atomic_write_json(manifest_path, manifest)
+            _report_progress(
+                progress, "正文页", offset // page_size + 1, total_pages
+            )
 
         posts = _ordered_posts(pages)
         _atomic_write_jsonl(
@@ -481,6 +507,7 @@ def _export_legacy_thread(
                 fetch,
                 manifest,
                 refresh_pids,
+                progress,
             )
 
         owner = apply_thread_owner(posts, previous_result_posts or [])
@@ -575,6 +602,7 @@ def _export_current_thread(
     full_refresh_lzl: bool = False,
     previous_update: object = None,
     previous_result_posts: list[Post] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     thread_id = extract_thread_id(value)
     export_dir = _resolve_output_dir(thread_id, output_dir)
@@ -646,8 +674,10 @@ def _export_current_thread(
         total_pages = first_page.total_pages
         if total_pages < 1:
             raise FetchError("贴吧新版接口分页信息无效")
+        _report_progress(progress, "正文页", 1, total_pages)
         for page_number in range(2, total_pages + 1):
             if page_number in pages:
+                _report_progress(progress, "正文页", page_number, total_pages)
                 continue
             page = fetch_page(page_number)
             if page.current_page != page_number:
@@ -659,6 +689,7 @@ def _export_current_thread(
             manifest["completed_pages"] = sorted(pages)
             manifest["updated_at"] = _timestamp()
             _atomic_write_json(manifest_path, manifest)
+            _report_progress(progress, "正文页", page_number, total_pages)
 
         posts = _ordered_posts(pages)
         manifest.update(
@@ -683,8 +714,15 @@ def _export_current_thread(
             completed = manifest.setdefault("completed_lzl_pids", [])
             if not isinstance(completed, list):
                 raise FetchError("导出清单中的楼中楼进度无效")
-            for post in posts:
-                if not post.pid or post.nested_reply_count <= len(post.nested_replies):
+            targets = [
+                post for post in posts if post.pid and post.nested_reply_count > 0
+            ]
+            _report_progress(progress, "楼中楼", 0, len(targets))
+            for target_number, post in enumerate(targets, 1):
+                if post.nested_reply_count <= len(post.nested_replies):
+                    _report_progress(
+                        progress, "楼中楼", target_number, len(targets)
+                    )
                     continue
                 offset = len(post.nested_replies)
                 post_dir = cache_dir / "lzl" / post.pid
@@ -709,6 +747,9 @@ def _export_current_thread(
                     completed.append(post.pid)
                 manifest["updated_at"] = _timestamp()
                 _atomic_write_json(manifest_path, manifest)
+                _report_progress(
+                    progress, "楼中楼", target_number, len(targets)
+                )
 
         owner = apply_thread_owner(posts, previous_result_posts or [])
         _atomic_write_jsonl(
@@ -766,6 +807,7 @@ def export_thread(
     current_client: CurrentTiebaClient | None = None,
     force_refresh: bool = False,
     full_refresh_lzl: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Export a thread, preferring the current authenticated JSON API."""
 
@@ -808,6 +850,7 @@ def export_thread(
                 full_refresh_lzl=full_refresh_lzl,
                 previous_update=previous_update,
                 previous_result_posts=previous_result_posts,
+                progress=progress,
             )
         except FetchError as exc:
             current_error = exc
@@ -834,6 +877,7 @@ def export_thread(
             full_refresh_lzl=full_refresh_lzl,
             previous_update=previous_update,
             previous_result_posts=previous_result_posts,
+            progress=progress,
         )
     except FetchError as legacy_error:
         if not result_path.exists():
@@ -856,6 +900,8 @@ def export_thread(
 
 
 def export_cli_main(argv: list[str] | None = None) -> int:
+    from .progress import TerminalProgress
+
     parser = argparse.ArgumentParser(
         prog="python -m tieba_cli export",
         description="优先使用贴吧新版接口将帖子完整导出为 JSON。",
@@ -890,6 +936,7 @@ def export_cli_main(argv: list[str] | None = None) -> int:
         help="忽略楼中楼数量是否变化，重新抓取全部楼中楼",
     )
     args = parser.parse_args(argv)
+    progress = TerminalProgress()
     try:
         result = export_thread(
             args.thread,
@@ -899,8 +946,11 @@ def export_cli_main(argv: list[str] | None = None) -> int:
             source=args.source,
             force_refresh=args.force_refresh,
             full_refresh_lzl=args.full_refresh_lzl,
+            progress=progress,
         )
     except (ValueError, OSError, FetchError) as exc:
         parser.exit(1, f"tieba-export: {exc}\n")
+    finally:
+        progress.close()
     sys.stdout.write(f"{result}\n")
     return 0

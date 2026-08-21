@@ -190,6 +190,8 @@ python -m tieba_cli export 10955297834
 python -m tieba_cli export 10955297834 --source legacy
 ```
 
+导出时会在终端显示“正文页”和“楼中楼”两个阶段的进度条。进度写入 stderr，stdout 仍然只输出最终 `thread.json` 路径，因此不会影响脚本通过命令替换或管道取得结果路径。输出被重定向或由 Agent 调用时，每个阶段只输出一行完成信息，避免产生大量刷新字符。
+
 默认结果位于：
 
 ```text
