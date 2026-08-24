@@ -242,6 +242,39 @@ def _sync_update_state(
         _atomic_write_json(result_path, result)
 
 
+def _write_archived_manifest_without_snapshot(
+    export_dir: Path,
+    *,
+    thread_id: str,
+    source: str,
+    include_lzl: bool,
+    update: dict[str, object],
+) -> None:
+    manifest_path = export_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = _read_json(manifest_path)
+    else:
+        checked_at = str(update.get("last_checked_at") or _timestamp())
+        manifest = {
+            "schema_version": 2,
+            "thread_id": thread_id,
+            "source": source,
+            "source_endpoint": (
+                CURRENT_THREAD_URL if source == "current" else MOBILE_THREAD_URL
+            ),
+            "include_lzl": include_lzl,
+            "created_at": checked_at,
+        }
+    manifest.update(
+        {
+            "status": "archived",
+            "update": update,
+            "updated_at": str(update.get("last_checked_at") or _timestamp()),
+        }
+    )
+    _atomic_write_json(manifest_path, manifest)
+
+
 def _prepare_refreshed_posts(
     posts: list[Post],
     previous_posts: list[Post],
@@ -857,11 +890,12 @@ def export_thread(
     previous_result_posts = _load_previous_result_posts(export_dir)
     if (
         previous_update.get("state") == "archived"
-        and result_path.exists()
         and not force_refresh
         and not full_refresh_lzl
     ):
-        return result_path
+        if result_path.exists():
+            return result_path
+        raise ThreadNotFoundError("帖子已归档，且没有可用的正文快照")
 
     refresh_existing = result_path.exists()
     if full_refresh_lzl:
@@ -888,6 +922,24 @@ def export_thread(
             )
         except FetchError as exc:
             current_error = exc
+            if isinstance(exc, ThreadNotFoundError):
+                update = mark_update_failure(
+                    previous_update,
+                    checked_at=_timestamp(),
+                    message=str(exc),
+                    confirmed_not_found=True,
+                )
+                if result_path.exists():
+                    _sync_update_state(export_dir, update)
+                    return result_path
+                _write_archived_manifest_without_snapshot(
+                    export_dir,
+                    thread_id=thread_id,
+                    source="current",
+                    include_lzl=include_lzl,
+                    update=update,
+                )
+                raise
             if source == "current":
                 if not result_path.exists():
                     raise
@@ -914,17 +966,25 @@ def export_thread(
             progress=progress,
         )
     except FetchError as legacy_error:
-        if not result_path.exists():
-            raise
-        confirmed_not_found = (
-            source == "auto"
-            and isinstance(current_error, ThreadNotFoundError)
-            and isinstance(
-                legacy_error, (ThreadNotFoundError, EmptySnapshotError)
-            )
-        )
+        confirmed_not_found = isinstance(legacy_error, ThreadNotFoundError)
         errors = [error for error in (current_error, legacy_error) if error]
         message = "；".join(str(error) for error in errors)
+        if not result_path.exists():
+            if confirmed_not_found:
+                update = mark_update_failure(
+                    previous_update,
+                    checked_at=_timestamp(),
+                    message=message,
+                    confirmed_not_found=True,
+                )
+                _write_archived_manifest_without_snapshot(
+                    export_dir,
+                    thread_id=thread_id,
+                    source="legacy",
+                    include_lzl=include_lzl,
+                    update=update,
+                )
+            raise
         update = mark_update_failure(
             previous_update,
             checked_at=_timestamp(),

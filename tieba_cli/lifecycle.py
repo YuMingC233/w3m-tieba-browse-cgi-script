@@ -5,9 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 
-ARCHIVE_AFTER_NOT_FOUND = 2
-
-
 def normalize_update_state(value: object) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     state = source.get("state")
@@ -59,7 +56,7 @@ def mark_update_failure(
     count = (
         state["consecutive_not_found"] + 1 if confirmed_not_found else 0
     )
-    archived = count >= ARCHIVE_AFTER_NOT_FOUND
+    archived = confirmed_not_found
     state.update(
         {
             "state": "archived" if archived else "check_failed",
@@ -68,7 +65,7 @@ def mark_update_failure(
             "consecutive_not_found": count,
             "archived_at": checked_at if archived else None,
             "archive_reason": (
-                "current_and_legacy_not_found" if archived else None
+                "explicit_not_found" if archived else None
             ),
         }
     )

@@ -772,28 +772,33 @@ class TiebaFilterTests(unittest.TestCase):
             self.assertEqual(manifest["source"], "current")
             self.assertEqual(manifest["total_posts"], 1)
 
-            for expected_count in (1, 2):
-                export_thread(
-                    "10957910001",
-                    output_dir=output_dir,
-                    include_lzl=True,
-                    delay=0,
-                    source="auto",
-                    current_client=DeletedClient(),
-                    fetcher=fetch_empty_legacy,
-                )
-                retained = json.loads(result_path.read_text(encoding="utf-8"))
-                self.assertEqual(retained["posts"], before["posts"])
-                self.assertEqual(
-                    retained["export"]["update"]["consecutive_not_found"],
-                    expected_count,
-                )
+            legacy_calls = []
+
+            def unexpected_legacy(request_value):
+                legacy_calls.append(request_value)
+                raise AssertionError("新版已明确删除时不应再请求旧版")
+
+            export_thread(
+                "10957910001",
+                output_dir=output_dir,
+                include_lzl=True,
+                delay=0,
+                source="auto",
+                current_client=DeletedClient(),
+                fetcher=unexpected_legacy,
+            )
+            retained = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(retained["posts"], before["posts"])
+            self.assertEqual(
+                retained["export"]["update"]["consecutive_not_found"], 1
+            )
+            self.assertEqual(legacy_calls, [])
 
             archived = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertEqual(archived["export"]["update"]["state"], "archived")
             self.assertEqual(
                 archived["export"]["update"]["archive_reason"],
-                "current_and_legacy_not_found",
+                "explicit_not_found",
             )
 
     def test_initial_empty_snapshot_is_rejected_for_both_sources(self):
@@ -848,7 +853,82 @@ class TiebaFilterTests(unittest.TestCase):
                         (output_dir / "current" / "pages" / "1.json").exists()
                     )
 
-    def test_update_failures_are_not_archived_until_repeated_dual_not_found(self):
+    def test_initial_explicit_deletion_writes_only_an_archived_manifest(self):
+        class MissingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_thread_page(self, thread_id, page_number):
+                self.calls += 1
+                raise ThreadNotFoundError("新版接口明确返回 404")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            missing_client = MissingClient()
+            with self.assertRaisesRegex(ThreadNotFoundError, "404"):
+                export_thread(
+                    "10957910001",
+                    output_dir=output_dir,
+                    delay=0,
+                    source="current",
+                    current_client=missing_client,
+                )
+
+            manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "archived")
+            self.assertEqual(manifest["update"]["state"], "archived")
+            self.assertEqual(
+                manifest["update"]["archive_reason"], "explicit_not_found"
+            )
+            self.assertFalse((output_dir / "thread.json").exists())
+            self.assertFalse((output_dir / "posts.jsonl").exists())
+
+            with self.assertRaisesRegex(ThreadNotFoundError, "已归档"):
+                export_thread(
+                    "10957910001",
+                    output_dir=output_dir,
+                    delay=0,
+                    source="current",
+                    current_client=missing_client,
+                )
+            self.assertEqual(missing_client.calls, 1)
+
+        legacy_calls = []
+
+        def missing_legacy(request_value):
+            legacy_calls.append(request_value)
+            raise ThreadNotFoundError("旧版接口明确返回 404")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            with self.assertRaisesRegex(ThreadNotFoundError, "404"):
+                export_thread(
+                    "10957910001",
+                    output_dir=output_dir,
+                    delay=0,
+                    source="legacy",
+                    fetcher=missing_legacy,
+                )
+            manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "archived")
+            self.assertEqual(manifest["update"]["state"], "archived")
+            self.assertFalse((output_dir / "thread.json").exists())
+
+            with self.assertRaisesRegex(ThreadNotFoundError, "已归档"):
+                export_thread(
+                    "10957910001",
+                    output_dir=output_dir,
+                    delay=0,
+                    source="legacy",
+                    fetcher=missing_legacy,
+                )
+            self.assertEqual(len(legacy_calls), 1)
+
+    def test_explicit_not_found_archives_immediately_and_skips_future_requests(self):
         class WorkingClient:
             def fetch_thread_page(self, thread_id, page_number):
                 return ThreadPage(
@@ -883,9 +963,9 @@ class TiebaFilterTests(unittest.TestCase):
 
         legacy_calls = []
 
-        def missing_legacy(request_value):
+        def unexpected_legacy(request_value):
             legacy_calls.append(request_value)
-            raise ThreadNotFoundError("旧版接口明确返回 404")
+            raise AssertionError("新版已明确删除时不应再请求旧版")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -918,21 +998,7 @@ class TiebaFilterTests(unittest.TestCase):
                 delay=0,
                 source="auto",
                 current_client=missing_client,
-                fetcher=missing_legacy,
-            )
-            first_missing = json.loads(
-                (output_dir / "manifest.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(first_missing["update"]["state"], "check_failed")
-            self.assertEqual(first_missing["update"]["consecutive_not_found"], 1)
-
-            export_thread(
-                "10955297834",
-                output_dir=output_dir,
-                delay=0,
-                source="auto",
-                current_client=missing_client,
-                fetcher=missing_legacy,
+                fetcher=unexpected_legacy,
             )
             archived = json.loads(
                 (output_dir / "manifest.json").read_text(encoding="utf-8")
@@ -941,6 +1007,7 @@ class TiebaFilterTests(unittest.TestCase):
             self.assertEqual(archived["update"]["state"], "archived")
             self.assertEqual(archived_result["export"]["update"]["state"], "archived")
             self.assertTrue(archived["update"]["archived_at"])
+            self.assertEqual(legacy_calls, [])
 
             calls_before_skip = (missing_client.calls, len(legacy_calls))
             export_thread(
@@ -949,7 +1016,7 @@ class TiebaFilterTests(unittest.TestCase):
                 delay=0,
                 source="auto",
                 current_client=missing_client,
-                fetcher=missing_legacy,
+                fetcher=unexpected_legacy,
             )
             self.assertEqual(
                 (missing_client.calls, len(legacy_calls)), calls_before_skip
