@@ -254,6 +254,14 @@ python -m tieba_cli export 10955297834 \
   --delay 1.5
 ```
 
+同时也支持 `rd` 为值:
+
+```bash
+python -m tieba_cli export 10955297834 \
+  --include-lzl \
+  --delay rd
+```
+
 `--include-lzl` 可能产生很多请求，也更容易遇到百度安全验证，所以默认关闭。`--delay` 控制连续请求的最小间隔，默认 1 秒。首次导出遇到验证、网络错误或手动中断后，重新执行同一命令会复用已经成功写入的逐页缓存。
 
 ### 更新检查与归档状态

@@ -7,6 +7,7 @@ import json
 import re
 import urllib.parse
 
+from collections.abc import Callable
 from .constants import CGI_URL, LZL_URL
 from .errors import FetchError
 from .filtering import filter_tieba_html
@@ -204,28 +205,37 @@ def add_thread_pagination(source: str, request_value: str) -> str:
     return source + pager
 
 
-def render_lzl_page(source: str, request_value: str) -> str:
-    """Render one page of nested replies with ordinary CGI pagination links."""
-
-    thread_id, parent_post_id, page = lzl_request_params(request_value)
+def _parse_lzl_payload(source: str) -> tuple[str, int, int]:
+    """parse one nested-reply api response."""
     try:
         payload = json.loads(source)
+
+        if not isinstance(payload, dict) or payload.get("no") != 0:
+            raise FetchError("贴吧楼中楼接口返回异常")
         data = payload["data"]
         page_data = data["page"]
+
         floor_html = data["floor_html"]
         total_num = page_data["total_num"]
         total_page = page_data["total_page"]
+    
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise FetchError("贴吧楼中楼接口返回了无法识别的数据") from exc
-
+    
     if (
-        not isinstance(payload, dict)
-        or payload.get("no") != 0
-        or not isinstance(floor_html, str)
+        not isinstance(floor_html, str)
         or not isinstance(total_num, int)
         or not isinstance(total_page, int)
     ):
         raise FetchError("贴吧楼中楼接口返回异常")
+    return floor_html, total_num, total_page
+
+# !deprecated
+def render_lzl_page(source: str, request_value: str) -> str:
+    """Render one page of nested replies with ordinary CGI pagination links."""
+
+    thread_id, parent_post_id, page = lzl_request_params(request_value)
+    floor_html, total_num, total_page = _parse_lzl_payload(source)
 
     upstream_url = (
         f"{LZL_URL}?"
@@ -259,4 +269,50 @@ def render_lzl_page(source: str, request_value: str) -> str:
         f"<title>帖子 {thread_id} 的楼中楼</title></head><body>"
         f"<h1>楼中楼</h1><ul>{content}</ul><nav><hr><p>{pager}</p></nav>"
         "</body></html>"
+    )
+
+def render_all_lzl_page(
+    request_val: str,
+    fetcher: Callable[[str], tuple[str, str]],
+) -> str:
+    """Fetch and render every page of one nested-reply thread"""
+    thread_id, parent_post_id, _ = lzl_request_params(request_val)
+
+    def local_request(page: int) -> str:
+        return urllib.parse.urlencode(
+            {
+                "lzl": "1",
+                "tid": thread_id,
+                "pid": parent_post_id,
+                "pn": page,
+            }
+        )
+    
+    first_source, first_upstream_url = fetcher(local_request(1))
+
+    # 第一页
+    floor_html, total_num, total_page = _parse_lzl_payload(first_source)
+    contents: list[str] = [filter_tieba_html(floor_html, base_url=first_upstream_url)]
+
+    # 第二——n页
+    for page in range(2, total_page + 1):
+        source, upstream_url = fetcher(local_request(page))
+        page_floor_html, _, _ = _parse_lzl_payload(source)
+        contents.append(filter_tieba_html(page_floor_html, base_url=upstream_url))
+    
+    contents = "".join(contents)
+
+    return (
+        '<!doctype html>'
+        '<html>'
+        '<head>'
+        '<meta charset="utf-8">'
+        f'<title>帖子 {thread_id} 的楼中楼</title>'
+        '</head>'
+        '<body>'
+        '<h1>楼中楼</h1>'
+        f'<p>共 {total_num} 条</p>'
+        f'<ul>{contents}</ul>'
+        '</body>'
+        '</html>'
     )

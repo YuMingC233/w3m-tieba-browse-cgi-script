@@ -10,14 +10,14 @@ import sys
 from .errors import FetchError
 from .fetching import fetch_tieba_html
 from .filtering import filter_tieba_html
-from .rendering import add_forum_pagination, add_thread_pagination, render_lzl_page
+from .rendering import add_forum_pagination, add_thread_pagination, render_all_lzl_page
 from .routing import is_forum_request, is_lzl_request
 
 
 def render_request(request_value: str) -> str:
-    source, upstream_url = fetch_tieba_html(request_value)
     if is_lzl_request(request_value):
-        return render_lzl_page(source, request_value)
+        return render_all_lzl_page(request_value, fetch_tieba_html)
+    source, upstream_url = fetch_tieba_html(request_value)
     if is_forum_request(request_value):
         source = add_forum_pagination(source, request_value)
     else:
