@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import random as rd
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -1012,8 +1013,8 @@ def export_cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--delay",
         type=float,
-        default=1.0,
-        help="连续请求的最小间隔秒数（默认：1.0）",
+        default=0,
+        help="连续请求的最小间隔秒数（默认：0，0为随机从1.5到3.0取值）",
     )
     parser.add_argument(
         "--source",
@@ -1032,6 +1033,10 @@ def export_cli_main(argv: list[str] | None = None) -> int:
         help="忽略楼中楼数量是否变化，重新抓取全部楼中楼",
     )
     args = parser.parse_args(argv)
+
+    if args.delay == 0:
+        args.delay = round(rd.uniform(1.5,3.0), 1)
+
     progress = TerminalProgress()
     try:
         result = export_thread(

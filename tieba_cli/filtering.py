@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import html
 import urllib.parse
+import re
 from html.parser import HTMLParser
 
 from .constants import CGI_URL, DROP_CLASSES, DROP_IDS, VOID_ELEMENTS
 from .routing import extract_thread_id, safe_upstream_params
 
+_CJK = r"\u3400-\u4dbf\u4e00-\u9fff"
+_CJK_PUNCTUATION = "，。！？；：、…,.!?;:"
 
 def _cgi_href_for_tieba_url(href: str, base_url: str) -> str:
     absolute = urllib.parse.urljoin(base_url, html.unescape(href))
@@ -34,6 +37,7 @@ class _TiebaHTMLFilter(HTMLParser):
         self.current_post_li_depth: int | None = None
         self.current_lzl_total: int | None = None
         self.thread_id: str | None = None
+        self.content_depth = 0
         if base_url:
             try:
                 self.thread_id = extract_thread_id(base_url)
@@ -130,6 +134,12 @@ class _TiebaHTMLFilter(HTMLParser):
             if tag not in VOID_ELEMENTS:
                 self.skip_depth = 1
             return
+        
+        # 记录文本深度是否为正文
+        if self.content_depth and tag not in VOID_ELEMENTS:
+            self.content_depth += 1
+        elif "content" in classes and tag == "div":
+            self.content_depth = 1
 
         attrs = self._format_attrs(tag, attrs)
         self.output.append(self._start_tag(tag, attrs, False))
@@ -154,6 +164,10 @@ class _TiebaHTMLFilter(HTMLParser):
             return
         tag = tag.lower()
         self.output.append(f"</{tag}>")
+
+        if self.content_depth:
+            self.content_depth -= 1
+
         if tag == "li":
             if self.current_post_li_depth == self.li_depth:
                 self.current_post_pid = None
@@ -162,8 +176,11 @@ class _TiebaHTMLFilter(HTMLParser):
             self.li_depth = max(0, self.li_depth - 1)
 
     def handle_data(self, data: str) -> None:
-        if not self.skip_depth:
-            self.output.append(data)
+        if self.skip_depth:
+            return
+        if self.content_depth:
+            data = _preserve_cjk_sentence_spaces(data)
+        self.output.append(data)
 
     def handle_entityref(self, name: str) -> None:
         if not self.skip_depth:
@@ -185,6 +202,31 @@ class _TiebaHTMLFilter(HTMLParser):
         if not self.skip_depth:
             self.output.append(f"<?{data}>")
 
+def _preserve_cjk_sentence_spaces(text: str) -> str:
+    """
+    将中文字符间的空格断句符号替换为全角空格，避免w3m视觉黏连
+    """
+    separators = re.findall(
+        rf"(?<=[{_CJK}])[\t ]+(?=[{_CJK}])",
+        text,
+    )
+    
+    # 空格很少，不认为是在拿空格当标点
+    if len(separators) < 2: return text
+
+    punctuation_count = sum(
+        text.count(char)
+        for char in _CJK_PUNCTUATION
+    )
+
+    # 标点符号比较多，不干预作者格式
+    if punctuation_count >= 2: return text
+
+    return re.sub(
+        rf"(?<=[{_CJK}])[\t ]+(?=[{_CJK}])",
+        "\u3000",
+        text,
+    )
 
 def filter_tieba_html(
     source: str,
