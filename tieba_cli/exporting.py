@@ -13,7 +13,7 @@ from typing import Callable
 
 from .constants import CURRENT_THREAD_URL, MOBILE_THREAD_URL
 from .current_api import CurrentNestedReplyPage, CurrentTiebaClient
-from .errors import FetchError, ThreadNotFoundError
+from .errors import EmptySnapshotError, FetchError, ThreadNotFoundError
 from .lifecycle import (
     mark_update_failure,
     mark_update_success,
@@ -148,6 +148,13 @@ def _page_from_dict(value: dict[str, object]) -> ThreadPage:
     )
 
 
+def _validate_first_page(page: ThreadPage, source_name: str) -> None:
+    if not page.posts:
+        raise EmptySnapshotError(
+            f"{source_name}首屏返回空帖子列表，拒绝用空内容覆盖现有归档"
+        )
+
+
 def _default_output_dir(thread_id: str) -> Path:
     cache_root = os.environ.get("XDG_CACHE_HOME")
     base = Path(cache_root) if cache_root else Path.home() / ".cache"
@@ -194,15 +201,40 @@ def _sync_update_state(
 ) -> None:
     manifest_path = export_dir / "manifest.json"
     result_path = export_dir / "thread.json"
+    result = _read_json(result_path) if result_path.exists() else None
     if manifest_path.exists():
         manifest = _read_json(manifest_path)
-        if result_path.exists():
+        if result is not None:
             manifest["status"] = "complete"
+            thread = result.get("thread")
+            export = result.get("export")
+            if isinstance(thread, dict):
+                manifest.update(
+                    {
+                        "title": thread.get("title", ""),
+                        "forum_name": thread.get("forum_name", ""),
+                        "total_pages": thread.get("total_pages", 1),
+                        "total_posts": thread.get("total_posts", 0),
+                    }
+                )
+                if "page_size" in thread:
+                    manifest["page_size"] = thread["page_size"]
+            if isinstance(export, dict):
+                manifest.update(
+                    {
+                        "source": export.get("source", manifest.get("source")),
+                        "source_endpoint": export.get(
+                            "source_endpoint", manifest.get("source_endpoint")
+                        ),
+                        "include_lzl": export.get(
+                            "include_lzl", manifest.get("include_lzl", False)
+                        ),
+                    }
+                )
         manifest["update"] = update
         manifest["updated_at"] = str(update.get("last_checked_at") or _timestamp())
         _atomic_write_json(manifest_path, manifest)
-    if result_path.exists():
-        result = _read_json(result_path)
+    if result is not None:
         export = result.setdefault("export", {})
         if not isinstance(export, dict):
             raise FetchError("thread.json 的导出元数据无效")
@@ -446,8 +478,11 @@ def _export_legacy_thread(
             first_page = parse_thread_page(source, thread_id)
             if first_page.offset != 0:
                 raise FetchError("贴吧首屏返回了异常的分页偏移量")
+            _validate_first_page(first_page, "贴吧旧移动端")
             pages[0] = first_page
             _atomic_write_json(pages_dir / "0.json", first_page.to_dict())
+        else:
+            _validate_first_page(first_page, "贴吧旧移动端缓存")
 
         page_size = first_page.page_size
         total_pages = first_page.total_pages
@@ -476,10 +511,6 @@ def _export_legacy_thread(
             )
 
         posts = _ordered_posts(pages)
-        _atomic_write_jsonl(
-            export_dir / "posts.jsonl",
-            [post.to_dict() for post in posts],
-        )
         manifest.update(
             {
                 "title": first_page.title,
@@ -668,8 +699,11 @@ def _export_current_thread(
             first_page = fetch_page(1)
             if first_page.current_page != 1:
                 raise FetchError("贴吧新版接口首页页码异常")
+            _validate_first_page(first_page, "贴吧新版接口")
             pages[1] = first_page
             _atomic_write_json(pages_dir / "1.json", first_page.to_dict())
+        else:
+            _validate_first_page(first_page, "贴吧新版接口缓存")
 
         total_pages = first_page.total_pages
         if total_pages < 1:
@@ -885,7 +919,9 @@ def export_thread(
         confirmed_not_found = (
             source == "auto"
             and isinstance(current_error, ThreadNotFoundError)
-            and isinstance(legacy_error, ThreadNotFoundError)
+            and isinstance(
+                legacy_error, (ThreadNotFoundError, EmptySnapshotError)
+            )
         )
         errors = [error for error in (current_error, legacy_error) if error]
         message = "；".join(str(error) for error in errors)

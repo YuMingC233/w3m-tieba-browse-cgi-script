@@ -183,6 +183,10 @@ class CurrentTiebaClient:
         code = payload.get("error_code", payload.get("no"))
         if code not in (0, "0"):
             message = payload.get("error_msg") or payload.get("error") or "未知错误"
+            if code in (4, "4"):
+                raise ThreadNotFoundError(
+                    f"贴吧新版接口表示帖子可能已被删除：{message}"
+                )
             raise FetchError(f"贴吧新版接口返回异常：{code} {message}")
         data = payload.get("data")
         return data if isinstance(data, dict) else payload

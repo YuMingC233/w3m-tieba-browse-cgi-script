@@ -7,3 +7,7 @@ class FetchError(RuntimeError):
 
 class ThreadNotFoundError(FetchError):
     """Raised only when Tieba explicitly reports that a thread is absent."""
+
+
+class EmptySnapshotError(FetchError):
+    """Raised when a candidate snapshot contains no main-thread posts."""

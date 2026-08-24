@@ -692,6 +692,162 @@ class TiebaFilterTests(unittest.TestCase):
         self.assertEqual(manifest["update"]["state"], "active")
         self.assertEqual(exported["export"]["update"]["state"], "active")
 
+    def test_empty_fallback_preserves_the_last_nonempty_snapshot(self):
+        class WorkingClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                return ThreadPage(
+                    thread_id=thread_id,
+                    title="不可覆盖的旧归档",
+                    forum_name="测试",
+                    page_size=1,
+                    offset=0,
+                    current_page=1,
+                    total_pages=1,
+                    total_posts=1,
+                    posts=[Post(
+                        pid="100001",
+                        floor=1,
+                        author="楼主",
+                        author_id="1",
+                        posted_at="1770000000",
+                        content_text="必须保留的正文",
+                    )],
+                )
+
+        class FailedClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                raise FetchError("新版接口加载数据失败")
+
+        class DeletedClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                raise ThreadNotFoundError("新版接口：贴子可能已被删除")
+
+        empty_legacy = """
+            <html><head><title>百度贴吧</title></head><body>
+            <div>通用空页面</div>
+            </body></html>
+        """
+
+        def fetch_empty_legacy(request_value):
+            return empty_legacy, _build_upstream_url(request_value)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            result_path = export_thread(
+                "10957910001",
+                output_dir=output_dir,
+                include_lzl=True,
+                delay=0,
+                source="current",
+                current_client=WorkingClient(),
+            )
+            before = json.loads(result_path.read_text(encoding="utf-8"))
+            posts_jsonl_before = (output_dir / "posts.jsonl").read_bytes()
+
+            preserved_path = export_thread(
+                "10957910001",
+                output_dir=output_dir,
+                include_lzl=True,
+                delay=0,
+                source="auto",
+                current_client=FailedClient(),
+                fetcher=fetch_empty_legacy,
+            )
+            after = json.loads(result_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (output_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(preserved_path, result_path)
+            self.assertEqual(after["thread"], before["thread"])
+            self.assertEqual(after["posts"], before["posts"])
+            self.assertEqual(after["export"]["source"], "current")
+            self.assertEqual(after["export"]["update"]["state"], "check_failed")
+            self.assertIn("空", after["export"]["update"]["last_error"])
+            self.assertEqual(
+                (output_dir / "posts.jsonl").read_bytes(), posts_jsonl_before
+            )
+            self.assertFalse((output_dir / "pages" / "0.json").exists())
+            self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(manifest["source"], "current")
+            self.assertEqual(manifest["total_posts"], 1)
+
+            for expected_count in (1, 2):
+                export_thread(
+                    "10957910001",
+                    output_dir=output_dir,
+                    include_lzl=True,
+                    delay=0,
+                    source="auto",
+                    current_client=DeletedClient(),
+                    fetcher=fetch_empty_legacy,
+                )
+                retained = json.loads(result_path.read_text(encoding="utf-8"))
+                self.assertEqual(retained["posts"], before["posts"])
+                self.assertEqual(
+                    retained["export"]["update"]["consecutive_not_found"],
+                    expected_count,
+                )
+
+            archived = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(archived["export"]["update"]["state"], "archived")
+            self.assertEqual(
+                archived["export"]["update"]["archive_reason"],
+                "current_and_legacy_not_found",
+            )
+
+    def test_initial_empty_snapshot_is_rejected_for_both_sources(self):
+        class EmptyCurrentClient:
+            def fetch_thread_page(self, thread_id, page_number):
+                return ThreadPage(
+                    thread_id=thread_id,
+                    title="",
+                    forum_name="",
+                    page_size=0,
+                    offset=0,
+                    current_page=1,
+                    total_pages=1,
+                    total_posts=0,
+                    posts=[],
+                )
+
+        empty_legacy = """
+            <html><head><title>百度贴吧</title></head><body></body></html>
+        """
+
+        def fetch_empty_legacy(request_value):
+            return empty_legacy, _build_upstream_url(request_value)
+
+        cases = (
+            {
+                "source": "current",
+                "current_client": EmptyCurrentClient(),
+            },
+            {
+                "source": "legacy",
+                "fetcher": fetch_empty_legacy,
+            },
+        )
+        for case_number, options in enumerate(cases):
+            with self.subTest(source=options["source"]):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    output_dir = Path(temp_dir) / str(case_number)
+                    with self.assertRaisesRegex(FetchError, "空"):
+                        export_thread(
+                            "10957910001",
+                            output_dir=output_dir,
+                            delay=0,
+                            **options,
+                        )
+                    self.assertFalse((output_dir / "thread.json").exists())
+                    self.assertFalse((output_dir / "posts.jsonl").exists())
+                    self.assertFalse(
+                        (output_dir / "pages" / "0.json").exists()
+                    )
+                    self.assertFalse(
+                        (output_dir / "current" / "pages" / "1.json").exists()
+                    )
+
     def test_update_failures_are_not_archived_until_repeated_dual_not_found(self):
         class WorkingClient:
             def fetch_thread_page(self, thread_id, page_number):
