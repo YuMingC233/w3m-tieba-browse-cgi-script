@@ -298,6 +298,36 @@ class TiebaFilterTests(unittest.TestCase):
             resumed = json.loads(resumed_path.read_text(encoding="utf-8"))
             self.assertEqual(resumed["export"]["status"], "complete")
             self.assertEqual(len(resumed["posts"]), 2)
+        
+        thread_paginated = add_thread_pagination(
+            thread_source,
+            "10955297834&pn=30",
+        )
+
+        self.assertIn(
+            "仅看楼主",
+            thread_paginated,
+        )
+
+        self.assertIn(
+            "?10955297834&amp;see_lz=1",
+            thread_paginated,
+        )
+        
+        owner_paginated = add_thread_pagination(
+            thread_source,
+            "10955297834&pn=30&see_lz=1",
+        )
+
+        self.assertIn(
+            "查看全部",
+            owner_paginated,
+        )
+
+        self.assertIn(
+            "?10955297834&amp;pn=60&amp;see_lz=1",
+            owner_paginated,
+        )
 
     def test_filter_removes_tieba_chrome_and_preserves_reading_content(self):
         source = """

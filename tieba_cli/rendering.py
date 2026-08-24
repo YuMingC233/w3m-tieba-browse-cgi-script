@@ -130,35 +130,59 @@ def add_thread_pagination(source: str, request_value: str) -> str:
         )
         links.append(f'<a href="{page_href(next_offset)}">下一页</a>')
 
-    controls: list[str] = []
+    toggle_links: list[str] = []
+    jump_form = ""
     if total_page_known:
+        # 正序与倒序的切换
         if reverse_order:
             normal_offset = (current_page - 1) * page_size
-            controls.append(
+            toggle_links.append(
                 f'<a href="{page_href(normal_offset, reverse=False)}">正序查看</a>'
             )
         else:
             reverse_offset = (total_page - current_page) * page_size
-            controls.append(
+            toggle_links.append(
                 f'<a href="{page_href(reverse_offset, reverse=True)}">倒序查看</a>'
             )
 
-        hidden_fields = [
-            f'<input type="hidden" name="kz" value="{thread_id}">',
-            f'<input type="hidden" name="page_size" value="{page_size}">',
-            f'<input type="hidden" name="total_page" value="{total_page}">',
-        ]
-        if "see_lz" in request_params:
-            hidden_fields.append(
-                '<input type="hidden" name="see_lz" value="'
-                + html.escape(request_params["see_lz"], quote=True)
-                + '">'
+        # 仅看楼主 / 查看全部
+        only_lz = request_params.get("see_lz") == "1"
+        if only_lz:
+            # 关闭仅看楼主，过滤条件被改变，将强制返回第一页
+            owner_href = html.escape(
+                f"{CGI_URL}{thread_id}",
+                quote=True
             )
+            toggle_links.append(
+                f'<a href="{owner_href}">查看全部</a>'
+            )
+        else:
+            # 开启，强制返回第一页，防止越界
+            owner_href = html.escape(
+                f"{CGI_URL}{thread_id}&see_lz=1",
+                quote=True
+            )
+            toggle_links.append(
+                f'<a href="{owner_href}">仅看楼主</a>'
+            )
+
+        if total_page_known:
+            hidden_fields = [
+                f'<input type="hidden" name="kz" value="{thread_id}">',
+                f'<input type="hidden" name="page_size" value="{page_size}">',
+                f'<input type="hidden" name="total_page" value="{total_page}">',
+            ]
+            if "see_lz" in request_params:
+                hidden_fields.append(
+                    '<input type="hidden" name="see_lz" value="'
+                    + html.escape(request_params["see_lz"], quote=True)
+                    + '">'
+                )
         if reverse_order:
             hidden_fields.append('<input type="hidden" name="r" value="1">')
 
         form_action = html.escape(CGI_URL.removesuffix("?"), quote=True)
-        controls.append(
+        jump_form = (
             f'<form action="{form_action}" method="get">'
             + "".join(hidden_fields)
             + '<label>跳转到第 <input type="text" inputmode="numeric" '
@@ -167,9 +191,13 @@ def add_thread_pagination(source: str, request_value: str) -> str:
         )
 
     pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p>"
-    if controls:
-        pager += f"<p>{controls[0]}</p>" + "".join(controls[1:])
+    if toggle_links:
+        pager += "<p>" + " | ".join(toggle_links) + "</p>"
+
+    if jump_form:
+        pager += jump_form
     pager += "</nav>"
+
     body_end = source.lower().rfind("</body>")
     if body_end >= 0:
         return source[:body_end] + pager + source[body_end:]
