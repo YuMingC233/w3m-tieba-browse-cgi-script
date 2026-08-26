@@ -103,6 +103,24 @@ def forum_request_params(value: str) -> tuple[str, int]:
     if not forum_name:
         raise ValueError("贴吧列表地址缺少 kw 参数")
 
+    if "page" in params:
+        page_value = params.get("page", [""])[0]
+        page_size_value = params.get("page_size", [""])[0]
+        total_page_value = params.get("total_page", [""])[0]
+        if not re.fullmatch(r"[1-9]\d*", page_value):
+            raise ValueError("贴吧列表页码必须是正整数")
+        if not re.fullmatch(r"[1-9]\d*", page_size_value):
+            raise ValueError("贴吧列表分页大小无效")
+        if not re.fullmatch(r"[1-9]\d*", total_page_value):
+            raise ValueError("贴吧列表总页数无效")
+
+        page = int(page_value)
+        page_size = int(page_size_value)
+        total_page = int(total_page_value)
+        if page > total_page:
+            raise ValueError(f"贴吧列表页码超出范围，当前共 {total_page} 页")
+        return forum_name, (page - 1) * page_size
+
     offset_value = params.get("pn", ["0"])[0]
     if not re.fullmatch(r"\d+", offset_value):
         raise ValueError("贴吧列表 pn 参数必须是非负整数")

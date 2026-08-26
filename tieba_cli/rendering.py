@@ -61,7 +61,25 @@ def add_forum_pagination(source: str, request_value: str) -> str:
     if has_next:
         links.append(f'<a href="{page_href(offset + page_size)}">下一页</a>')
 
-    pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p></nav>"
+    jump_form = ""
+    if isinstance(total_page, int) and total_page > 0:
+        form_action = html.escape(CGI_URL.removesuffix("?"), quote=True)
+        jump_form = (
+            f'<form action="{form_action}" method="get">'
+            + '<input type="hidden" name="kw" value="'
+            + html.escape(forum_name, quote=True)
+            + '">'
+            + f'<input type="hidden" name="page_size" value="{page_size}">'
+            + f'<input type="hidden" name="total_page" value="{total_page}">'
+            + '<label>跳转到第 <input type="text" inputmode="numeric" '
+            + f'name="page" size="6" value="{current_page}"> 页</label> '
+            + '<input type="submit" value="跳转"></form>'
+        )
+
+    pager = '<nav class="tieba_cli_pager"><hr><p>' + " | ".join(links) + "</p>"
+    if jump_form:
+        pager += jump_form
+    pager += "</nav>"
     body_end = source.lower().rfind("</body>")
     if body_end >= 0:
         return source[:body_end] + pager + source[body_end:]
