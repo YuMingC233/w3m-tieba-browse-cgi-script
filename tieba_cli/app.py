@@ -58,6 +58,10 @@ def cli_main(argv: list[str] | None = None) -> int:
         from .exporting import export_cli_main
 
         return export_cli_main(arguments[1:])
+    if arguments[:1] == ["owner-md"]:
+        from .owner_markdown import owner_markdown_cli_main
+
+        return owner_markdown_cli_main(arguments[1:])
 
     parser = argparse.ArgumentParser(
         description="Download and simplify a Tieba thread or forum page for w3m."

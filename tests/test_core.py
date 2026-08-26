@@ -1169,6 +1169,123 @@ class TiebaFilterTests(unittest.TestCase):
             overridden["posts"][2]["nested_replies"][0]["is_thread_owner"]
         )
 
+    def test_owner_markdown_contains_only_owner_content_in_time_order(self):
+        from tieba_cli.owner_markdown import export_owner_markdown
+
+        thread_id = "10955297834"
+        snapshot = {
+            "schema_version": 2,
+            "thread": {
+                "id": thread_id,
+                "title": "楼主发言整理测试",
+                "forum_name": "测试",
+                "owner": {
+                    "status": "detected",
+                    "author_id": "123456",
+                    "author": "测试楼主",
+                    "match_by": "author_id",
+                },
+            },
+            "export": {
+                "status": "complete",
+                "include_lzl": True,
+                "captured_at": "2026-08-26T00:00:00+00:00",
+            },
+            "posts": [
+                {
+                    "pid": "main-owner",
+                    "floor": 1,
+                    "author": "测试楼主",
+                    "author_id": "123456",
+                    "posted_at": "200",
+                    "content_text": "较晚的主楼发言\n[图片]",
+                    "content": [{
+                        "type": 3,
+                        "origin_src": "https://example.com/owner.jpg",
+                    }],
+                    "is_thread_owner": True,
+                    "nested_replies": [],
+                },
+                {
+                    "pid": "other-main",
+                    "floor": 2,
+                    "author": "其他用户",
+                    "author_id": "999",
+                    "posted_at": "50",
+                    "content_text": "不应出现的其他用户主楼",
+                    "content": [],
+                    "is_thread_owner": False,
+                    "nested_replies": [
+                        {
+                            "pid": "nested-owner",
+                            "author": "测试楼主",
+                            "author_id": "123456",
+                            "posted_at": "100",
+                            "content_text": "较早的楼主楼中楼",
+                            "content": [],
+                            "is_thread_owner": True,
+                        },
+                        {
+                            "pid": "nested-other",
+                            "author": "其他用户",
+                            "author_id": "999",
+                            "posted_at": "150",
+                            "content_text": "不应出现的其他用户楼中楼",
+                            "content": [],
+                            "is_thread_owner": False,
+                        },
+                    ],
+                },
+                {
+                    "pid": "unknown-time-owner",
+                    "floor": 3,
+                    "author": "测试楼主",
+                    "author_id": "123456",
+                    "posted_at": "",
+                    "content_text": "时间未知但仍需保留",
+                    "content": [],
+                    "is_thread_owner": True,
+                    "nested_replies": [],
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_root = Path(temp_dir)
+            thread_dir = cache_root / thread_id
+            thread_dir.mkdir()
+            snapshot["export"]["include_lzl"] = False
+            (thread_dir / "thread.json").write_text(
+                json.dumps(snapshot, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(FetchError, "--include-lzl"):
+                export_owner_markdown(thread_id, cache_root=cache_root)
+
+            snapshot["export"]["include_lzl"] = True
+            (thread_dir / "thread.json").write_text(
+                json.dumps(snapshot, ensure_ascii=False), encoding="utf-8"
+            )
+
+            output_path = export_owner_markdown(
+                thread_id, cache_root=cache_root
+            )
+            markdown = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(output_path.name, "123456.md")
+        self.assertLess(
+            markdown.index("较早的楼主楼中楼"),
+            markdown.index("较晚的主楼发言"),
+        )
+        self.assertLess(
+            markdown.index("较晚的主楼发言"),
+            markdown.index("时间未知但仍需保留"),
+        )
+        self.assertIn("楼中楼", markdown)
+        self.assertIn("时间未知", markdown)
+        self.assertIn("https://example.com/owner.jpg", markdown)
+        self.assertNotIn("不应出现的其他用户主楼", markdown)
+        self.assertNotIn("不应出现的其他用户楼中楼", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()
